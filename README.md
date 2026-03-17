@@ -14,14 +14,14 @@ Index, summarize, and search past [pi](https://github.com/badlogic/pi-mono) codi
 ## Install
 
 ```bash
-pi install @samfoy/pi-session-search
+pi install pi-session-search
 ```
 
 Or add to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "packages": ["npm:@samfoy/pi-session-search"]
+  "packages": ["npm:pi-session-search"]
 }
 ```
 

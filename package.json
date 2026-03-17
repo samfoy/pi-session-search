@@ -1,5 +1,5 @@
 {
-  "name": "@samfoy/pi-session-search",
+  "name": "pi-session-search",
   "version": "0.1.0",
   "description": "Index, summarize, and search past pi sessions. Covers both active and archived sessions, enabling semantic search and introspection over your coding history.",
   "keywords": [
