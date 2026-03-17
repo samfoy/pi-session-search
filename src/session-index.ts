@@ -1,0 +1,441 @@
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import type { ParsedSession } from "./parser";
+import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
+import type { Embedder } from "./embedder";
+
+// ─── Types ───────────────────────────────────────────────────────────
+
+interface IndexedSession {
+  /** Parsed session metadata */
+  session: ParsedSession;
+  /** Generated summary for display + search */
+  summary: string;
+  /** Embedding vector of the summary + key content */
+  embedding: number[];
+  /** File mtime when last indexed */
+  mtimeMs: number;
+}
+
+interface IndexData {
+  version: number;
+  /** Keyed by session UUID — stable across file moves */
+  sessions: Record<string, IndexedSession>;
+}
+
+const INDEX_VERSION = 2;
+
+// ─── Session Index ───────────────────────────────────────────────────
+
+export class SessionIndex {
+  private data: IndexData = { version: INDEX_VERSION, sessions: {} };
+  private indexPath: string;
+
+  constructor(
+    private embedder: Embedder,
+    private indexDir: string,
+    private extraSessionDirs: string[] = [],
+    private extraArchiveDirs: string[] = [],
+  ) {
+    mkdirSync(indexDir, { recursive: true });
+    this.indexPath = join(indexDir, "session-index.json");
+  }
+
+  /** Load existing index from disk. */
+  async load(): Promise<void> {
+    if (!existsSync(this.indexPath)) return;
+    try {
+      const raw = readFileSync(this.indexPath, "utf8");
+      const parsed = JSON.parse(raw) as IndexData;
+      if (parsed.version === INDEX_VERSION) {
+        this.data = parsed;
+      }
+      // v1 index (keyed by file path) is incompatible — rebuild from scratch
+    } catch {
+      this.data = { version: INDEX_VERSION, sessions: {} };
+    }
+  }
+
+  /** Save index to disk. */
+  save(): void {
+    writeFileSync(this.indexPath, JSON.stringify(this.data), "utf8");
+  }
+
+  /** Number of indexed sessions. */
+  size(): number {
+    return Object.keys(this.data.sessions).length;
+  }
+
+  /**
+   * Sync: discover sessions, parse new/changed ones, handle moves, remove
+   * sessions whose files no longer exist anywhere.
+   */
+  async sync(
+    onProgress?: (msg: string) => void
+  ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
+    const discovered = discoverSessionFiles(
+      this.extraSessionDirs,
+      this.extraArchiveDirs,
+    );
+
+    let added = 0;
+    let updated = 0;
+    let removed = 0;
+    let moved = 0;
+
+    // ── Phase 1: Build a map of discovered files → session ID ────────
+    // We need session IDs to correlate with the index. For files already
+    // in the index we can match by scanning existing entries. For unknown
+    // files we do a quick header-only read.
+    const fileToId = new Map<string, string>();
+    const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number }>();
+
+    // Build a reverse lookup: sessionId → current indexed file path
+    const indexedIdToFile = new Map<string, string>();
+    for (const [id, entry] of Object.entries(this.data.sessions)) {
+      indexedIdToFile.set(id, entry.session.file);
+    }
+
+    for (const { file, archived } of discovered) {
+      let mtimeMs: number;
+      try {
+        mtimeMs = statSync(file).mtimeMs;
+      } catch {
+        continue; // can't stat — skip
+      }
+
+      // Try to match by checking if any indexed entry already has this file
+      let sessionId: string | null = null;
+      for (const [id, entry] of Object.entries(this.data.sessions)) {
+        if (entry.session.file === file) {
+          sessionId = id;
+          break;
+        }
+      }
+
+      // Not found in index by path — quick-read the header for the UUID
+      if (!sessionId) {
+        sessionId = readSessionId(file);
+      }
+
+      if (!sessionId) continue; // unparseable file
+
+      fileToId.set(file, sessionId);
+
+      // If multiple files claim the same session ID, prefer the newer one
+      const existing = idToFile.get(sessionId);
+      if (!existing || mtimeMs > existing.mtimeMs) {
+        idToFile.set(sessionId, { file, archived, mtimeMs });
+      }
+    }
+
+    // ── Phase 2: Remove indexed sessions that no longer exist on disk ─
+    const discoveredIds = new Set(idToFile.keys());
+    for (const id of Object.keys(this.data.sessions)) {
+      if (!discoveredIds.has(id)) {
+        delete this.data.sessions[id];
+        removed++;
+      }
+    }
+
+    // ── Phase 3: Detect moves, new, and changed sessions ─────────────
+    const toEmbed: { id: string; file: string; archived: boolean; mtimeMs: number }[] = [];
+
+    for (const [id, disc] of idToFile.entries()) {
+      const existing = this.data.sessions[id];
+
+      if (existing) {
+        // Session already indexed
+        const pathChanged = existing.session.file !== disc.file;
+        const contentChanged = existing.mtimeMs < disc.mtimeMs;
+
+        if (pathChanged && !contentChanged) {
+          // ── Moved (e.g. sessions/ → sessions-archive/) ──
+          // Update file path + archived flag, keep embedding
+          existing.session.file = disc.file;
+          existing.session.archived = disc.archived;
+          existing.mtimeMs = disc.mtimeMs;
+          existing.summary = buildSummary(existing.session);
+          moved++;
+        } else if (contentChanged) {
+          // ── Content changed (active session got new messages) ──
+          // Need full re-parse + re-embed
+          toEmbed.push({ id, ...disc });
+        }
+        // else: unchanged — skip
+      } else {
+        // ── Brand new session ──
+        toEmbed.push({ id, ...disc });
+      }
+    }
+
+    if (toEmbed.length === 0) {
+      if (moved > 0 || removed > 0) this.save();
+      return { added, updated, removed, moved };
+    }
+
+    onProgress?.(`Indexing ${toEmbed.length} sessions...`);
+
+    // ── Phase 4: Parse + embed in batches ────────────────────────────
+    const BATCH_SIZE = 20;
+    for (let i = 0; i < toEmbed.length; i += BATCH_SIZE) {
+      const batch = toEmbed.slice(i, i + BATCH_SIZE);
+      const parsed: { item: (typeof toEmbed)[0]; session: ParsedSession }[] = [];
+
+      for (const item of batch) {
+        const session = parseSession(item.file, item.archived);
+        if (session && session.userMessageCount > 0) {
+          parsed.push({ item, session });
+        }
+      }
+
+      if (parsed.length === 0) continue;
+
+      const texts = parsed.map(({ session }) => buildEmbeddingText(session));
+
+      try {
+        const embeddings = await this.embedder.embedBatch(texts);
+
+        for (let j = 0; j < parsed.length; j++) {
+          const { item, session } = parsed[j];
+          const embedding = embeddings[j];
+          if (!embedding) continue; // failed to embed
+
+          const isUpdate = !!this.data.sessions[item.id];
+
+          this.data.sessions[item.id] = {
+            session,
+            summary: buildSummary(session),
+            embedding,
+            mtimeMs: item.mtimeMs,
+          };
+
+          if (isUpdate) updated++;
+          else added++;
+        }
+      } catch (err: any) {
+        onProgress?.(`Embedding batch failed: ${err.message}`);
+      }
+
+      onProgress?.(
+        `Indexed ${Math.min(i + BATCH_SIZE, toEmbed.length)}/${toEmbed.length}...`
+      );
+    }
+
+    this.save();
+    return { added, updated, removed, moved };
+  }
+
+  /** Full rebuild — clear and re-index everything. */
+  async rebuild(onProgress?: (msg: string) => void): Promise<void> {
+    this.data = { version: INDEX_VERSION, sessions: {} };
+    await this.sync(onProgress);
+  }
+
+  /**
+   * Semantic search across sessions.
+   */
+  async search(
+    query: string,
+    limit: number = 10,
+    signal?: AbortSignal
+  ): Promise<SearchResult[]> {
+    const entries = Object.values(this.data.sessions);
+    if (entries.length === 0) return [];
+
+    const queryEmbedding = await this.embedder.embed(query);
+    if (signal?.aborted) return [];
+
+    const scored = entries.map((entry) => ({
+      entry,
+      score: cosineSimilarity(queryEmbedding, entry.embedding),
+    }));
+
+    scored.sort((a, b) => b.score - a.score);
+
+    return scored.slice(0, limit).map(({ entry, score }) => ({
+      session: entry.session,
+      summary: entry.summary,
+      score,
+    }));
+  }
+
+  /**
+   * List sessions with optional filters.
+   */
+  list(filters?: ListFilters): ParsedSession[] {
+    let sessions = Object.values(this.data.sessions).map((e) => e.session);
+
+    if (filters?.project) {
+      const slug = filters.project.toLowerCase();
+      sessions = sessions.filter(
+        (s) =>
+          s.projectSlug.toLowerCase().includes(slug) ||
+          s.cwd.toLowerCase().includes(slug)
+      );
+    }
+
+    if (filters?.after) {
+      sessions = sessions.filter((s) => s.startedAt >= filters.after!);
+    }
+
+    if (filters?.before) {
+      sessions = sessions.filter((s) => s.startedAt <= filters.before!);
+    }
+
+    if (filters?.archived !== undefined) {
+      sessions = sessions.filter((s) => s.archived === filters.archived);
+    }
+
+    // Sort by start time, newest first
+    sessions.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+
+    if (filters?.limit) {
+      sessions = sessions.slice(0, filters.limit);
+    }
+
+    return sessions;
+  }
+
+  /**
+   * Get a specific session by file path or session ID.
+   */
+  get(fileOrId: string): IndexedSession | undefined {
+    // Try direct session ID lookup
+    if (this.data.sessions[fileOrId]) {
+      return this.data.sessions[fileOrId];
+    }
+    // Try by file path
+    return Object.values(this.data.sessions).find(
+      (e) => e.session.file === fileOrId
+    );
+  }
+
+  /** Get all indexed session objects. */
+  getAll(): IndexedSession[] {
+    return Object.values(this.data.sessions);
+  }
+}
+
+// ─── Search types ────────────────────────────────────────────────────
+
+export interface SearchResult {
+  session: ParsedSession;
+  summary: string;
+  score: number;
+}
+
+export interface ListFilters {
+  project?: string;
+  after?: string;
+  before?: string;
+  archived?: boolean;
+  limit?: number;
+}
+
+// ─── Summary generation ──────────────────────────────────────────────
+
+function buildSummary(s: ParsedSession): string {
+  const lines: string[] = [];
+  const name = s.name || truncate(s.firstUserMessage, 80);
+  const date = s.startedAt.split("T")[0];
+  const project = slugToProject(s.projectSlug);
+
+  lines.push(`**${name}** (${date})`);
+  lines.push(`Project: ${project} | CWD: ${s.cwd}`);
+  lines.push(
+    `Messages: ${s.userMessageCount} user, ${s.assistantMessageCount} assistant`
+  );
+
+  if (s.models.length > 0) {
+    lines.push(`Models: ${s.models.join(", ")}`);
+  }
+
+  if (s.toolCalls.length > 0) {
+    const top = s.toolCalls
+      .slice(0, 5)
+      .map((t) => `${t.name}(${t.count})`)
+      .join(", ");
+    lines.push(`Tools: ${top}`);
+  }
+
+  if (s.filesModified.length > 0) {
+    lines.push(`Modified: ${s.filesModified.slice(0, 10).join(", ")}`);
+  }
+
+  if (s.compactionSummaries.length > 0) {
+    lines.push(`\nCompaction summaries:`);
+    for (const cs of s.compactionSummaries) {
+      lines.push(truncate(cs, 500));
+    }
+  }
+
+  if (s.archived) {
+    lines.push(`(archived)`);
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Build text for embedding — combines key content for semantic search.
+ */
+function buildEmbeddingText(s: ParsedSession): string {
+  const parts: string[] = [];
+
+  if (s.name) parts.push(s.name);
+
+  // User messages are the strongest signal
+  const userText = s.userMessages.join("\n").slice(0, 8000);
+  parts.push(userText);
+
+  // Compaction summaries are great condensed representations
+  if (s.compactionSummaries.length > 0) {
+    parts.push(s.compactionSummaries.join("\n").slice(0, 4000));
+  }
+
+  // Branch summaries
+  if (s.branchSummaries.length > 0) {
+    parts.push(s.branchSummaries.join("\n").slice(0, 2000));
+  }
+
+  // Project context
+  parts.push(`Project: ${slugToProject(s.projectSlug)}`);
+  parts.push(`CWD: ${s.cwd}`);
+
+  // Files modified give strong project context
+  if (s.filesModified.length > 0) {
+    parts.push(`Files modified: ${s.filesModified.join(", ")}`);
+  }
+
+  // Limit total embedding text
+  return parts.join("\n\n").slice(0, 16000);
+}
+
+// ─── Utilities ───────────────────────────────────────────────────────
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0,
+    normA = 0,
+    normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + "…";
+}
+
+function slugToProject(slug: string): string {
+  if (!slug.startsWith("--") || !slug.endsWith("--")) return slug;
+  return slug
+    .slice(2, -2)
+    .replace(/-/g, "/");
+}
