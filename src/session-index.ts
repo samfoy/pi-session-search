@@ -1,8 +1,39 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { ParsedSession } from "./parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { Embedder } from "./embedder";
+import { buildContent, toFtsQuery } from "./fts-index";
+
+// ─── FTS side-car (for hybrid search) ────────────────────────────────
+
+class FtsSide {
+  private db: DatabaseSync;
+  constructor(indexDir: string) {
+    this.db = new DatabaseSync(join(indexDir, "hybrid-fts.db"));
+    this.db.exec(
+      "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(id UNINDEXED, name, content, tokenize='porter unicode61')",
+    );
+  }
+  upsert(id: string, name: string, content: string) {
+    this.db.prepare("DELETE FROM s WHERE id = ?").run(id);
+    this.db.prepare("INSERT INTO s (id, name, content) VALUES (?, ?, ?)").run(id, name, content);
+  }
+  delete(id: string) { this.db.prepare("DELETE FROM s WHERE id = ?").run(id); }
+  clear() { this.db.exec("DELETE FROM s"); }
+  /** Returns id→rank map (rank starts at 1, best first). */
+  searchRanks(q: string, limit: number): Map<string, number> {
+    const fts = toFtsQuery(q);
+    const out = new Map<string, number>();
+    if (!fts) return out;
+    const rows = this.db
+      .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s) LIMIT ?")
+      .all(fts, limit) as any[];
+    rows.forEach((r, i) => out.set(String(r.id), i + 1));
+    return out;
+  }
+}
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -30,6 +61,7 @@ const INDEX_VERSION = 2;
 export class SessionIndex {
   private data: IndexData = { version: INDEX_VERSION, sessions: {} };
   private indexPath: string;
+  private fts: FtsSide;
 
   constructor(
     private embedder: Embedder,
@@ -39,6 +71,7 @@ export class SessionIndex {
   ) {
     mkdirSync(indexDir, { recursive: true });
     this.indexPath = join(indexDir, "session-index.json");
+    this.fts = new FtsSide(indexDir);
   }
 
   /** Load existing index from disk. */
@@ -134,6 +167,7 @@ export class SessionIndex {
     for (const id of Object.keys(this.data.sessions)) {
       if (!discoveredIds.has(id)) {
         delete this.data.sessions[id];
+        this.fts.delete(id);
         removed++;
       }
     }
@@ -209,6 +243,7 @@ export class SessionIndex {
             embedding,
             mtimeMs: item.mtimeMs,
           };
+          this.fts.upsert(item.id, session.name ?? "", buildContent(session));
 
           if (isUpdate) updated++;
           else added++;
@@ -229,11 +264,13 @@ export class SessionIndex {
   /** Full rebuild — clear and re-index everything. */
   async rebuild(onProgress?: (msg: string) => void): Promise<void> {
     this.data = { version: INDEX_VERSION, sessions: {} };
+    this.fts.clear();
     await this.sync(onProgress);
   }
 
   /**
-   * Semantic search across sessions.
+   * Hybrid search: cosine embeddings + FTS5 BM25, fused via Reciprocal Rank
+   * Fusion (k=60). Falls back to pure semantic if FTS side-car is empty.
    */
   async search(
     query: string,
@@ -246,18 +283,38 @@ export class SessionIndex {
     const queryEmbedding = await this.embedder.embed(query);
     if (signal?.aborted) return [];
 
-    const scored = entries.map((entry) => ({
-      entry,
-      score: cosineSimilarity(queryEmbedding, entry.embedding),
-    }));
+    // Rank by cosine similarity
+    const cosineScored = entries
+      .map((entry) => ({
+        entry,
+        score: cosineSimilarity(queryEmbedding, entry.embedding),
+      }))
+      .sort((a, b) => b.score - a.score);
 
-    scored.sort((a, b) => b.score - a.score);
+    // Pull a larger candidate pool from each side so fusion has room to rank
+    const poolSize = Math.max(limit * 5, 50);
+    const cosineRanks = new Map<string, number>();
+    cosineScored.slice(0, poolSize).forEach((s, i) => {
+      cosineRanks.set(s.entry.session.id, i + 1);
+    });
 
-    return scored.slice(0, limit).map(({ entry, score }) => ({
-      session: entry.session,
-      summary: entry.summary,
-      score,
-    }));
+    const ftsRanks = this.fts.searchRanks(query, poolSize);
+
+    // RRF fusion: score = Σ 1 / (k + rank)
+    const K = 60;
+    const fused = new Map<string, number>();
+    for (const [id, r] of cosineRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+    for (const [id, r] of ftsRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+
+    const sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+
+    return sorted
+      .map(([id, score]) => {
+        const entry = this.data.sessions[id];
+        if (!entry) return null;
+        return { session: entry.session, summary: entry.summary, score };
+      })
+      .filter((r): r is SearchResult => r !== null);
   }
 
   /**
