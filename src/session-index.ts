@@ -7,12 +7,12 @@ import type { Embedder } from "./embedder";
 // ─── Types ───────────────────────────────────────────────────────────
 
 interface IndexedSession {
-  /** Parsed session metadata */
+  /** Parsed session metadata (heavy text fields stripped after embedding) */
   session: ParsedSession;
   /** Generated summary for display + search */
   summary: string;
-  /** Embedding vector of the summary + key content */
-  embedding: number[];
+  /** Embedding vector of the summary + key content (base64 Float32Array) */
+  embedding: number[] | string;
   /** File mtime when last indexed */
   mtimeMs: number;
 }
@@ -23,7 +23,38 @@ interface IndexData {
   sessions: Record<string, IndexedSession>;
 }
 
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
+
+// ─── Embedding serialization ─────────────────────────────────────────
+
+/** Encode a float array as base64 Float32Array — ~3x smaller than JSON. */
+function encodeEmbedding(vec: number[]): string {
+  const buf = Buffer.from(new Float32Array(vec).buffer);
+  return buf.toString("base64");
+}
+
+/** Decode a base64 Float32Array back to number[]. Also handles legacy JSON arrays. */
+function decodeEmbedding(stored: number[] | string): number[] {
+  if (Array.isArray(stored)) return stored; // legacy format
+  const buf = Buffer.from(stored, "base64");
+  return Array.from(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
+}
+
+/**
+ * Strip heavy text fields from ParsedSession before persisting.
+ * These are only needed during embedding generation, not at search/list time.
+ * Saves ~17MB across 2000 sessions.
+ */
+function stripHeavyFields(session: ParsedSession): ParsedSession {
+  return {
+    ...session,
+    userMessages: [],
+    assistantText: "",
+    firstUserMessage: session.firstUserMessage.slice(0, 200),
+    compactionSummaries: session.compactionSummaries.map(s => s.slice(0, 300)),
+    branchSummaries: session.branchSummaries.map(s => s.slice(0, 200)),
+  };
+}
 
 // ─── Session Index ───────────────────────────────────────────────────
 
@@ -49,6 +80,17 @@ export class SessionIndex {
       const parsed = JSON.parse(raw) as IndexData;
       if (parsed.version === INDEX_VERSION) {
         this.data = parsed;
+      } else if (parsed.version === 2) {
+        // Migrate v2 → v3: encode embeddings as base64, strip heavy fields
+        for (const entry of Object.values(parsed.sessions)) {
+          if (Array.isArray(entry.embedding)) {
+            entry.embedding = encodeEmbedding(entry.embedding);
+          }
+          entry.session = stripHeavyFields(entry.session);
+        }
+        parsed.version = INDEX_VERSION;
+        this.data = parsed;
+        this.save(); // persist the migration
       }
       // v1 index (keyed by file path) is incompatible — rebuild from scratch
     } catch {
@@ -204,9 +246,9 @@ export class SessionIndex {
           const isUpdate = !!this.data.sessions[item.id];
 
           this.data.sessions[item.id] = {
-            session,
+            session: stripHeavyFields(session),
             summary: buildSummary(session),
-            embedding,
+            embedding: encodeEmbedding(embedding),
             mtimeMs: item.mtimeMs,
           };
 
@@ -248,7 +290,7 @@ export class SessionIndex {
 
     const scored = entries.map((entry) => ({
       entry,
-      score: cosineSimilarity(queryEmbedding, entry.embedding),
+      score: cosineSimilarity(queryEmbedding, decodeEmbedding(entry.embedding)),
     }));
 
     scored.sort((a, b) => b.score - a.score);
