@@ -25,35 +25,27 @@ export default function (pi: ExtensionAPI) {
       currentConfig = loadConfig();
     } catch (err: any) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
-      return;
     }
 
-    if (!currentConfig) {
-      // Not configured — silent until user runs setup
-      return;
-    }
-
-    // Fire-and-forget: don't block session startup if indexing is slow
-    // (e.g. embedder credentials are unavailable). The search tools already
-    // handle the index not being ready gracefully.
+    // FTS5 works out of the box with no config; embeddings are optional.
     void startIndex(currentConfig, ctx);
   });
 
-  async function startIndex(config: Config, ctx: any) {
+  async function startIndex(config: Config | null, ctx: any) {
     try {
-      if (config.embedder.type === "fts") {
-        sessionIndex = new FtsSessionIndex(
-          getIndexDir(),
-          config.extraSessionDirs,
-          config.extraArchiveDirs,
-        );
-      } else {
+      if (config?.embedder) {
         const embedder = createEmbedder(config.embedder);
         sessionIndex = new SessionIndex(
           embedder,
           getIndexDir(),
           config.extraSessionDirs,
           config.extraArchiveDirs,
+        );
+      } else {
+        sessionIndex = new FtsSessionIndex(
+          getIndexDir(),
+          config?.extraSessionDirs ?? [],
+          config?.extraArchiveDirs ?? [],
         );
       }
       await sessionIndex.load();
@@ -126,12 +118,11 @@ export default function (pi: ExtensionAPI) {
   // Setup command
   // ------------------------------------------------------------------
 
-  pi.registerCommand("session-search-setup", {
+  pi.registerCommand("session-embeddings-setup", {
     description:
-      "Configure session search — choose embedding provider",
+      "Enable semantic embeddings for hybrid search (FTS5 is always on)",
     handler: async (_args, ctx) => {
       const providerChoice = await ctx.ui.select("Embedding provider:", [
-        "fts — Local SQLite FTS5 keyword search (no config, no API keys)",
         "openai — OpenAI API (text-embedding-3-small)",
         "bedrock — AWS Bedrock (Titan Embeddings v2)",
         "ollama — Local Ollama (nomic-embed-text)",
@@ -143,7 +134,6 @@ export default function (pi: ExtensionAPI) {
       }
 
       const providerType = providerChoice.split(" ")[0] as
-        | "fts"
         | "openai"
         | "bedrock"
         | "ollama";
@@ -151,10 +141,6 @@ export default function (pi: ExtensionAPI) {
       let embedder: any;
 
       switch (providerType) {
-        case "fts": {
-          embedder = { type: "fts" as const };
-          break;
-        }
         case "openai": {
           const apiKey = await ctx.ui.input(
             "OpenAI API key (or env var name):",
@@ -237,7 +223,7 @@ export default function (pi: ExtensionAPI) {
     description: "Force an immediate incremental re-sync of session index",
     handler: async (_args, ctx) => {
       if (!sessionIndex) {
-        ctx.ui.notify("Not configured. Run /session-search-setup first.", "warning");
+        ctx.ui.notify("Session index not ready yet.", "warning");
         return;
       }
       try {
@@ -267,7 +253,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (!sessionIndex) {
         ctx.ui.notify(
-          "Not configured. Run /session-search-setup first.",
+          "Session index not ready yet.",
           "warning"
         );
         return;
@@ -314,7 +300,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (!sessionIndex || sessionIndex.size() === 0) {
         const msg = !sessionIndex
-          ? "session-search is not configured. The user can run /session-search-setup to set it up."
+          ? "Session index not ready yet."
           : "Session index is empty — it may still be building. Try again in a moment.";
         return { content: [{ type: "text", text: msg }], details: {} };
       }
@@ -398,7 +384,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (!sessionIndex || sessionIndex.size() === 0) {
         const msg = !sessionIndex
-          ? "session-search is not configured. The user can run /session-search-setup to set it up."
+          ? "Session index not ready yet."
           : "Session index is empty.";
         return { content: [{ type: "text", text: msg }], details: {} };
       }
