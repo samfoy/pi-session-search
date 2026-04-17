@@ -4,10 +4,13 @@ import { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
 import type { Config } from "./config";
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
+import { FtsSessionIndex } from "./fts-index";
 import { readSessionConversation } from "./reader";
 
+type AnyIndex = SessionIndex | FtsSessionIndex;
+
 export default function (pi: ExtensionAPI) {
-  let sessionIndex: SessionIndex | null = null;
+  let sessionIndex: AnyIndex | null = null;
   let currentConfig: Config | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -22,29 +25,29 @@ export default function (pi: ExtensionAPI) {
       currentConfig = loadConfig();
     } catch (err: any) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
-      return;
     }
 
-    if (!currentConfig) {
-      // Not configured — silent until user runs setup
-      return;
-    }
-
-    // Fire-and-forget: don't block session startup if indexing is slow
-    // (e.g. embedder credentials are unavailable). The search tools already
-    // handle the index not being ready gracefully.
+    // FTS5 works out of the box with no config; embeddings are optional.
     void startIndex(currentConfig, ctx);
   });
 
-  async function startIndex(config: Config, ctx: any) {
+  async function startIndex(config: Config | null, ctx: any) {
     try {
-      const embedder = createEmbedder(config.embedder);
-      sessionIndex = new SessionIndex(
-        embedder,
-        getIndexDir(),
-        config.extraSessionDirs,
-        config.extraArchiveDirs,
-      );
+      if (config?.embedder) {
+        const embedder = createEmbedder(config.embedder);
+        sessionIndex = new SessionIndex(
+          embedder,
+          getIndexDir(),
+          config.extraSessionDirs,
+          config.extraArchiveDirs,
+        );
+      } else {
+        sessionIndex = new FtsSessionIndex(
+          getIndexDir(),
+          config?.extraSessionDirs ?? [],
+          config?.extraArchiveDirs ?? [],
+        );
+      }
       await sessionIndex.load();
 
       // Sync with a timeout so a hung embedder doesn't block forever.
@@ -115,9 +118,9 @@ export default function (pi: ExtensionAPI) {
   // Setup command
   // ------------------------------------------------------------------
 
-  pi.registerCommand("session-search-setup", {
+  pi.registerCommand("session-embeddings-setup", {
     description:
-      "Configure session search — choose embedding provider",
+      "Enable semantic embeddings for hybrid search (FTS5 is always on)",
     handler: async (_args, ctx) => {
       const providerChoice = await ctx.ui.select("Embedding provider:", [
         "openai — OpenAI API (text-embedding-3-small)",
@@ -213,6 +216,35 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ------------------------------------------------------------------
+  // Sync command
+  // ------------------------------------------------------------------
+
+  pi.registerCommand("session-sync", {
+    description: "Force an immediate incremental re-sync of session index",
+    handler: async (_args, ctx) => {
+      if (!sessionIndex) {
+        ctx.ui.notify("Session index not ready yet.", "warning");
+        return;
+      }
+      try {
+        const r = await sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg));
+        const parts: string[] = [];
+        if (r.added) parts.push(`+${r.added}`);
+        if (r.updated) parts.push(`~${r.updated}`);
+        if (r.removed) parts.push(`-${r.removed}`);
+        if (r.moved) parts.push(`↗${r.moved}`);
+        ctx.ui.notify(
+          `Synced: ${parts.join(" ") || "no changes"} (${sessionIndex.size()} total)`,
+          "success",
+        );
+        ctx.ui.setStatus("session-search", "");
+      } catch (err: any) {
+        ctx.ui.notify(`Sync failed: ${err.message}`, "error");
+      }
+    },
+  });
+
+  // ------------------------------------------------------------------
   // Reindex command
   // ------------------------------------------------------------------
 
@@ -221,7 +253,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (!sessionIndex) {
         ctx.ui.notify(
-          "Not configured. Run /session-search-setup first.",
+          "Session index not ready yet.",
           "warning"
         );
         return;
@@ -268,7 +300,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       if (!sessionIndex || sessionIndex.size() === 0) {
         const msg = !sessionIndex
-          ? "session-search is not configured. The user can run /session-search-setup to set it up."
+          ? "Session index not ready yet."
           : "Session index is empty — it may still be building. Try again in a moment.";
         return { content: [{ type: "text", text: msg }], details: {} };
       }
@@ -352,7 +384,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (!sessionIndex || sessionIndex.size() === 0) {
         const msg = !sessionIndex
-          ? "session-search is not configured. The user can run /session-search-setup to set it up."
+          ? "Session index not ready yet."
           : "Session index is empty.";
         return { content: [{ type: "text", text: msg }], details: {} };
       }

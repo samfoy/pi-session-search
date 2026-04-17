@@ -9,14 +9,14 @@ export interface Config {
   extraSessionDirs: string[];
   /** Extra archive directories to scan (in addition to default) */
   extraArchiveDirs: string[];
-  /** Embedder configuration */
-  embedder: EmbedderConfig;
+  /** Optional embedder configuration — enables hybrid search when set */
+  embedder?: EmbedderConfig;
 }
 
 export interface ConfigFile {
   extraSessionDirs?: string[];
   extraArchiveDirs?: string[];
-  embedder: EmbedderConfig;
+  embedder?: EmbedderConfig;
 }
 
 // ─── Paths ───────────────────────────────────────────────────────────
