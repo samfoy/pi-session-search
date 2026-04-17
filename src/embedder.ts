@@ -12,7 +12,7 @@ export interface Embedder {
 }
 
 export interface EmbedderConfig {
-  type: "openai" | "bedrock" | "ollama";
+  type: "openai" | "bedrock" | "ollama" | "fts";
   // OpenAI
   apiKey?: string;
   model?: string;

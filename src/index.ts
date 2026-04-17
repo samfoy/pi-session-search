@@ -4,10 +4,13 @@ import { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
 import type { Config } from "./config";
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
+import { FtsSessionIndex } from "./fts-index";
 import { readSessionConversation } from "./reader";
 
+type AnyIndex = SessionIndex | FtsSessionIndex;
+
 export default function (pi: ExtensionAPI) {
-  let sessionIndex: SessionIndex | null = null;
+  let sessionIndex: AnyIndex | null = null;
   let currentConfig: Config | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -38,13 +41,21 @@ export default function (pi: ExtensionAPI) {
 
   async function startIndex(config: Config, ctx: any) {
     try {
-      const embedder = createEmbedder(config.embedder);
-      sessionIndex = new SessionIndex(
-        embedder,
-        getIndexDir(),
-        config.extraSessionDirs,
-        config.extraArchiveDirs,
-      );
+      if (config.embedder.type === "fts") {
+        sessionIndex = new FtsSessionIndex(
+          getIndexDir(),
+          config.extraSessionDirs,
+          config.extraArchiveDirs,
+        );
+      } else {
+        const embedder = createEmbedder(config.embedder);
+        sessionIndex = new SessionIndex(
+          embedder,
+          getIndexDir(),
+          config.extraSessionDirs,
+          config.extraArchiveDirs,
+        );
+      }
       await sessionIndex.load();
 
       // Sync with a timeout so a hung embedder doesn't block forever.
@@ -120,6 +131,7 @@ export default function (pi: ExtensionAPI) {
       "Configure session search — choose embedding provider",
     handler: async (_args, ctx) => {
       const providerChoice = await ctx.ui.select("Embedding provider:", [
+        "fts — Local SQLite FTS5 keyword search (no config, no API keys)",
         "openai — OpenAI API (text-embedding-3-small)",
         "bedrock — AWS Bedrock (Titan Embeddings v2)",
         "ollama — Local Ollama (nomic-embed-text)",
@@ -131,6 +143,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const providerType = providerChoice.split(" ")[0] as
+        | "fts"
         | "openai"
         | "bedrock"
         | "ollama";
@@ -138,6 +151,10 @@ export default function (pi: ExtensionAPI) {
       let embedder: any;
 
       switch (providerType) {
+        case "fts": {
+          embedder = { type: "fts" as const };
+          break;
+        }
         case "openai": {
           const apiKey = await ctx.ui.input(
             "OpenAI API key (or env var name):",
@@ -209,6 +226,35 @@ export default function (pi: ExtensionAPI) {
         `Config saved to ${getConfigPath()}. Run /reload to activate.`,
         "success"
       );
+    },
+  });
+
+  // ------------------------------------------------------------------
+  // Sync command
+  // ------------------------------------------------------------------
+
+  pi.registerCommand("session-sync", {
+    description: "Force an immediate incremental re-sync of session index",
+    handler: async (_args, ctx) => {
+      if (!sessionIndex) {
+        ctx.ui.notify("Not configured. Run /session-search-setup first.", "warning");
+        return;
+      }
+      try {
+        const r = await sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg));
+        const parts: string[] = [];
+        if (r.added) parts.push(`+${r.added}`);
+        if (r.updated) parts.push(`~${r.updated}`);
+        if (r.removed) parts.push(`-${r.removed}`);
+        if (r.moved) parts.push(`↗${r.moved}`);
+        ctx.ui.notify(
+          `Synced: ${parts.join(" ") || "no changes"} (${sessionIndex.size()} total)`,
+          "success",
+        );
+        ctx.ui.setStatus("session-search", "");
+      } catch (err: any) {
+        ctx.ui.notify(`Sync failed: ${err.message}`, "error");
+      }
     },
   });
 
