@@ -112,6 +112,9 @@ export default function (pi: ExtensionAPI) {
       clearInterval(syncTimer);
       syncTimer = null;
     }
+    if (sessionIndex && "close" in sessionIndex) {
+      (sessionIndex as any).close();
+    }
   });
 
   // ------------------------------------------------------------------
