@@ -17,11 +17,14 @@ class FtsSide {
     );
   }
   upsert(id: string, name: string, content: string) {
+    this.db.exec("BEGIN");
     this.db.prepare("DELETE FROM s WHERE id = ?").run(id);
     this.db.prepare("INSERT INTO s (id, name, content) VALUES (?, ?, ?)").run(id, name, content);
+    this.db.exec("COMMIT");
   }
   delete(id: string) { this.db.prepare("DELETE FROM s WHERE id = ?").run(id); }
   clear() { this.db.exec("DELETE FROM s"); }
+  close() { this.db.close(); }
   /** Returns id→rank map (rank starts at 1, best first). */
   searchRanks(q: string, limit: number): Map<string, number> {
     const fts = toFtsQuery(q);
@@ -334,7 +337,7 @@ export class SessionIndex {
       .sort((a, b) => b.score - a.score);
 
     // Pull a larger candidate pool from each side so fusion has room to rank
-    const poolSize = Math.max(limit * 5, 50);
+    const poolSize = Math.max(limit * 5, 100);
     const cosineRanks = new Map<string, number>();
     cosineScored.slice(0, poolSize).forEach((s, i) => {
       cosineRanks.set(s.entry.session.id, i + 1);
@@ -413,6 +416,10 @@ export class SessionIndex {
   /** Get all indexed session objects. */
   getAll(): IndexedSession[] {
     return Object.values(this.data.sessions);
+  }
+
+  close(): void {
+    this.fts.close();
   }
 }
 

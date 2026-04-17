@@ -87,12 +87,14 @@ export class FtsSessionIndex {
 
     // Remove sessions no longer present
     const delStmt = this.db.prepare("DELETE FROM sessions WHERE id = ?");
+    this.db.exec("BEGIN");
     for (const id of currentIds) {
       if (!idToFile.has(id)) {
         delStmt.run(id);
         removed++;
       }
     }
+    this.db.exec("COMMIT");
 
     // Figure out what needs (re-)ingestion
     const toIngest: { id: string; file: string; archived: boolean; mtimeMs: number }[] = [];
@@ -125,6 +127,7 @@ export class FtsSessionIndex {
     `);
     const replaceDel = this.db.prepare("DELETE FROM sessions WHERE id = ?");
 
+    this.db.exec("BEGIN");
     let done = 0;
     for (const item of toIngest) {
       const session = parseSession(item.file, item.archived);
@@ -150,6 +153,7 @@ export class FtsSessionIndex {
       done++;
       if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
     }
+    this.db.exec("COMMIT");
 
     return { added, updated, removed, moved };
   }
@@ -215,6 +219,10 @@ export class FtsSessionIndex {
       summary: String(r.summary ?? ""),
     }));
   }
+
+  close(): void {
+    this.db.close();
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -253,7 +261,9 @@ function truncate(s: string, max: number): string {
 
 /**
  * Turn a user query into a safe FTS5 MATCH expression.
- * Strips FTS syntax characters and ORs the remaining terms.
+ * Strips FTS syntax characters, quotes each term, and joins with implicit AND.
+ * AND is more precise than OR — BM25 ranks multi-term matches highest, and
+ * sessions missing a term are excluded rather than diluting the result set.
  */
 export function toFtsQuery(q: string): string {
   const terms = q
@@ -262,5 +272,5 @@ export function toFtsQuery(q: string): string {
     .map((t) => t.trim())
     .filter((t) => t.length > 0)
     .map((t) => `"${t}"`);
-  return terms.join(" OR ");
+  return terms.join(" "); // implicit AND in FTS5
 }
