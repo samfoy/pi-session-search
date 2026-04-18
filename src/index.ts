@@ -50,35 +50,40 @@ export default function (pi: ExtensionAPI) {
       }
       await sessionIndex.load();
 
-      // Sync with a timeout so a hung embedder doesn't block forever.
-      // The loaded cache is still usable for searches even if sync times out.
+      // Fire-and-forget: run initial sync in the background so startIndex
+      // returns immediately and doesn't block pi's startup.
       const SYNC_TIMEOUT_MS = 120_000;
-      const syncResult = await Promise.race([
+      Promise.race([
         sessionIndex.sync(
           (msg) => ctx.ui.setStatus("session-search", msg)
         ),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_TIMEOUT_MS)),
-      ]);
-
-      if (syncResult === null) {
-        ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
-        ctx.ui.setStatus("session-search", "");
-      } else {
-        const { added, updated, removed, moved } = syncResult;
-        const changes = added + updated + removed + moved;
-        if (changes > 0) {
-          const parts: string[] = [];
-          if (added) parts.push(`+${added}`);
-          if (updated) parts.push(`~${updated}`);
-          if (removed) parts.push(`-${removed}`);
-          if (moved) parts.push(`↗${moved} moved`);
-          ctx.ui.setStatus(
-            "session-search",
-            `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`
-          );
-          setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
-        }
-      }
+      ])
+        .then((syncResult) => {
+          if (syncResult === null) {
+            ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
+            ctx.ui.setStatus("session-search", "");
+          } else {
+            const { added, updated, removed, moved } = syncResult;
+            const changes = added + updated + removed + moved;
+            if (changes > 0) {
+              const parts: string[] = [];
+              if (added) parts.push(`+${added}`);
+              if (updated) parts.push(`~${updated}`);
+              if (removed) parts.push(`-${removed}`);
+              if (moved) parts.push(`↗${moved} moved`);
+              ctx.ui.setStatus(
+                "session-search",
+                `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`
+              );
+              setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
+            }
+          }
+        })
+        .catch((err) => {
+          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+          ctx.ui.setStatus("session-search", "");
+        });
 
       // Periodic background sync to pick up new/changed sessions
       syncTimer = setInterval(async () => {
