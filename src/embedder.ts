@@ -160,11 +160,9 @@ class BedrockEmbedder implements Embedder {
         "@aws-sdk/client-bedrock-runtime"
       );
       const { fromIni } = await import("@aws-sdk/credential-providers");
-      const { NodeHttpHandler } = await import("@smithy/node-http-handler");
       return new BedrockRuntimeClient({
         region,
         credentials: fromIni({ profile }),
-        requestHandler: new NodeHttpHandler(),
       });
     })();
   }
