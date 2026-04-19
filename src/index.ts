@@ -21,6 +21,53 @@ export default function (pi: ExtensionAPI) {
   // Lifecycle
   // ------------------------------------------------------------------
 
+  // ------------------------------------------------------------------
+  // Session primer — inject recent session context before agent starts
+  // ------------------------------------------------------------------
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!sessionIndex || sessionIndex.size() === 0) return;
+
+    try {
+      const cwd = ctx.cwd || "";
+      // Derive a project slug from cwd to filter sessions
+      const projectSlug = cwd ? pathToSlug(cwd) : undefined;
+
+      // Get recent sessions, optionally filtered by project
+      let sessions = sessionIndex.list({
+        project: projectSlug,
+        limit: 5,
+      });
+
+      // Fall back to global recent if no project matches
+      if (sessions.length === 0 && projectSlug) {
+        sessions = sessionIndex.list({ limit: 5 });
+      }
+
+      if (sessions.length === 0) return;
+
+      const lines = sessions.map((s) => {
+        const name = s.name || truncate(s.firstUserMessage, 80);
+        const date = s.startedAt.split("T")[0];
+        const rel = formatRelativeDate(s.startedAt);
+        const displayCwd = s.cwd.replace(process.env.HOME || "", "~").slice(0, 60);
+        const msgs = `${s.userMessageCount} user, ${s.assistantMessageCount} assistant`;
+        const mode = s.models[0] ? ` Mode: ${s.models[0].split("/").pop()}` : "";
+        return `- **${rel}**: **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${mode}`;
+      });
+
+      const primer = `\n\n## Recent Sessions (this project)\n${lines.join("\n")}\n`;
+
+      // Keep it under 500 chars if possible
+      const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
+
+      return { systemPrompt: (event.systemPrompt || "") + trimmed };
+    } catch {
+      // Don't block on primer failure
+      return undefined;
+    }
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     try {
       currentConfig = loadConfig();
@@ -541,4 +588,37 @@ export default function (pi: ExtensionAPI) {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max) + "…";
+}
+
+/** Convert a cwd path to a project slug for filtering. */
+function pathToSlug(cwd: string): string {
+  const home = process.env.HOME || "";
+  const rel = cwd.startsWith(home) ? cwd.slice(home.length + 1) : cwd;
+  return rel.replace(/\//g, "-");
+}
+
+/** Format an ISO date as a relative time string (e.g. "2h ago", "3d ago"). */
+function formatRelativeDate(iso: string): string {
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const diffMs = now - then;
+  if (diffMs < 0) return "just now";
+
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "1d ago";
+  if (days < 7) return `${days}d ago`;
+  if (days < 14) return "last week";
+
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `${weeks}w ago`;
+
+  const months = Math.floor(days / 30);
+  return months <= 1 ? "last month" : `${months}mo ago`;
 }

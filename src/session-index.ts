@@ -26,6 +26,9 @@ class FtsSide {
   delete(id: string) { this.db.prepare("DELETE FROM s WHERE id = ?").run(id); }
   clear() { this.db.exec("DELETE FROM s"); }
   close() { this.db.close(); }
+  count(): number {
+    return (this.db.prepare("SELECT count(*) as c FROM s").get() as any).c;
+  }
   /** Returns id→rank map (rank starts at 1, best first). */
   searchRanks(q: string, limit: number): Map<string, number> {
     const fts = toFtsQuery(q);
@@ -134,6 +137,32 @@ export class SessionIndex {
       // v1 index (keyed by file path) is incompatible — rebuild from scratch
     } catch {
       this.data = { version: INDEX_VERSION, sessions: {} };
+    }
+
+    // Populate FTS side-car if it's empty but the JSON index has sessions
+    const sessionCount = Object.keys(this.data.sessions).length;
+    if (sessionCount > 0 && this.fts.count() === 0) {
+      this.populateFtsFromIndex();
+    }
+  }
+
+  /**
+   * Populate the FTS side-car from existing index data.
+   * Used when the JSON index is loaded but the FTS DB is empty (e.g. first
+   * run after upgrade, or if the .db file was deleted).
+   */
+  private populateFtsFromIndex(): void {
+    for (const [id, entry] of Object.entries(this.data.sessions)) {
+      const s = entry.session;
+      // Reconstruct FTS content from the stripped session metadata
+      const parts: string[] = [];
+      if (s.name) parts.push(s.name);
+      if (s.firstUserMessage) parts.push(s.firstUserMessage);
+      if (s.compactionSummaries?.length) parts.push(s.compactionSummaries.join("\n"));
+      if (s.branchSummaries?.length) parts.push(s.branchSummaries.join("\n"));
+      if (s.filesModified?.length) parts.push(s.filesModified.join(" "));
+      const content = parts.join("\n\n");
+      this.fts.upsert(id, s.name ?? "", content);
     }
   }
 
@@ -500,8 +529,15 @@ function buildEmbeddingText(s: ParsedSession): string {
   if (s.name) parts.push(s.name);
 
   // User messages are the strongest signal
-  const userText = s.userMessages.join("\n").slice(0, 8000);
+  const userText = s.userMessages.join("\n").slice(0, 6000);
   parts.push(userText);
+
+  // Assistant text captures analysis, conclusions, and discoveries
+  if (s.assistantText) {
+    const assistantBudget = 3000;
+    const truncatedAssistant = s.assistantText.slice(0, assistantBudget);
+    parts.push(`Assistant:\n${truncatedAssistant}`);
+  }
 
   // Compaction summaries are great condensed representations
   if (s.compactionSummaries.length > 0) {
