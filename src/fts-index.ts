@@ -30,6 +30,22 @@ export class FtsSessionIndex {
 
   async load(): Promise<void> {
     this.db = new DatabaseSync(this.dbPath);
+    this.db.exec("PRAGMA busy_timeout = 5000;");
+
+    // Migrate: add sizeBytes column if missing (FTS5 UNINDEXED columns)
+    // FTS5 virtual tables don't support ALTER TABLE ADD COLUMN, so we check
+    // if the table has the sizeBytes column by attempting a query.
+    let hasSizeBytes = false;
+    try {
+      this.db.prepare("SELECT sizeBytes FROM sessions LIMIT 0").all();
+      hasSizeBytes = true;
+    } catch {
+      // Column doesn't exist — need to recreate the table
+    }
+    if (!hasSizeBytes) {
+      this.db.exec("DROP TABLE IF EXISTS sessions");
+    }
+
     this.db.exec(`
       CREATE VIRTUAL TABLE IF NOT EXISTS sessions USING fts5(
         id UNINDEXED,
@@ -39,6 +55,7 @@ export class FtsSessionIndex {
         projectSlug UNINDEXED,
         cwd UNINDEXED,
         mtimeMs UNINDEXED,
+        sizeBytes UNINDEXED,
         json UNINDEXED,
         summary UNINDEXED,
         name,
@@ -63,26 +80,35 @@ export class FtsSessionIndex {
     let added = 0, updated = 0, removed = 0, moved = 0;
 
     // Build idToFile map from disk (preferring newer mtime on dupes)
-    const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number }>();
+    const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number; sizeBytes: number }>();
     for (const { file, archived } of discovered) {
       let mtimeMs: number;
-      try { mtimeMs = statSync(file).mtimeMs; } catch { continue; }
+      let sizeBytes: number;
+      try {
+        const st = statSync(file);
+        mtimeMs = st.mtimeMs;
+        sizeBytes = st.size;
+      } catch { continue; }
       const id = readSessionId(file);
       if (!id) continue;
       const existing = idToFile.get(id);
       if (!existing || mtimeMs > existing.mtimeMs) {
-        idToFile.set(id, { file, archived, mtimeMs });
+        idToFile.set(id, { file, archived, mtimeMs, sizeBytes });
       }
     }
 
     // Current index state
     const currentRows = this.db
-      .prepare("SELECT id, file, mtimeMs FROM sessions")
+      .prepare("SELECT id, file, mtimeMs, sizeBytes FROM sessions")
       .all() as any[];
     const currentIds = new Set(currentRows.map((r) => String(r.id)));
-    const currentById = new Map<string, { file: string; mtimeMs: number }>();
+    const currentById = new Map<string, { file: string; mtimeMs: number; sizeBytes: number }>();
     for (const r of currentRows) {
-      currentById.set(String(r.id), { file: String(r.file), mtimeMs: Number(r.mtimeMs) });
+      currentById.set(String(r.id), {
+        file: String(r.file),
+        mtimeMs: Number(r.mtimeMs),
+        sizeBytes: Number(r.sizeBytes ?? 0),
+      });
     }
 
     // Remove sessions no longer present
@@ -97,33 +123,35 @@ export class FtsSessionIndex {
     this.db.exec("COMMIT");
 
     // Figure out what needs (re-)ingestion
-    const toIngest: { id: string; file: string; archived: boolean; mtimeMs: number }[] = [];
-    const movedUpdates: { id: string; file: string; archived: boolean; mtimeMs: number }[] = [];
+    const toIngest: { id: string; file: string; archived: boolean; mtimeMs: number; sizeBytes: number }[] = [];
+    const movedUpdates: { id: string; file: string; archived: boolean; mtimeMs: number; sizeBytes: number }[] = [];
     for (const [id, disc] of idToFile.entries()) {
       const cur = currentById.get(id);
       if (!cur) {
         toIngest.push({ id, ...disc });
-      } else if (cur.mtimeMs < disc.mtimeMs) {
+      } else if (cur.sizeBytes !== disc.sizeBytes) {
+        // File size changed — content was actually modified
         toIngest.push({ id, ...disc });
       } else if (cur.file !== disc.file) {
         movedUpdates.push({ id, ...disc });
       }
+      // else: same size (and same file) — skip even if mtime differs
     }
 
     // Apply moves (metadata-only) without reparse
     const moveStmt = this.db.prepare(
-      "UPDATE sessions SET file = ?, archived = ?, mtimeMs = ? WHERE id = ?",
+      "UPDATE sessions SET file = ?, archived = ?, mtimeMs = ?, sizeBytes = ? WHERE id = ?",
     );
     for (const m of movedUpdates) {
-      moveStmt.run(m.file, m.archived ? 1 : 0, m.mtimeMs, m.id);
+      moveStmt.run(m.file, m.archived ? 1 : 0, m.mtimeMs, m.sizeBytes, m.id);
       moved++;
     }
 
     if (toIngest.length > 0) onProgress?.(`Indexing ${toIngest.length} sessions...`);
 
     const insertStmt = this.db.prepare(`
-      INSERT INTO sessions (id, file, archived, startedAt, projectSlug, cwd, mtimeMs, json, summary, name, content)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (id, file, archived, startedAt, projectSlug, cwd, mtimeMs, sizeBytes, json, summary, name, content)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const replaceDel = this.db.prepare("DELETE FROM sessions WHERE id = ?");
 
@@ -144,6 +172,7 @@ export class FtsSessionIndex {
         session.projectSlug,
         session.cwd,
         item.mtimeMs,
+        item.sizeBytes,
         JSON.stringify(session),
         summary,
         session.name ?? "",

@@ -12,6 +12,7 @@ class FtsSide {
   private db: DatabaseSync;
   constructor(indexDir: string) {
     this.db = new DatabaseSync(join(indexDir, "hybrid-fts.db"));
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec(
       "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(id UNINDEXED, name, content, tokenize='porter unicode61')",
     );
@@ -49,6 +50,8 @@ interface IndexedSession {
   embedding: number[] | string;
   /** File mtime when last indexed */
   mtimeMs: number;
+  /** File size in bytes when last indexed */
+  sizeBytes?: number;
 }
 
 interface IndexData {
@@ -166,7 +169,7 @@ export class SessionIndex {
     // in the index we can match by scanning existing entries. For unknown
     // files we do a quick header-only read.
     const fileToId = new Map<string, string>();
-    const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number }>();
+    const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number; sizeBytes: number }>();
 
     // Build a reverse lookup: sessionId → current indexed file path
     const indexedIdToFile = new Map<string, string>();
@@ -176,8 +179,11 @@ export class SessionIndex {
 
     for (const { file, archived } of discovered) {
       let mtimeMs: number;
+      let sizeBytes: number;
       try {
-        mtimeMs = statSync(file).mtimeMs;
+        const st = statSync(file);
+        mtimeMs = st.mtimeMs;
+        sizeBytes = st.size;
       } catch {
         continue; // can't stat — skip
       }
@@ -203,7 +209,7 @@ export class SessionIndex {
       // If multiple files claim the same session ID, prefer the newer one
       const existing = idToFile.get(sessionId);
       if (!existing || mtimeMs > existing.mtimeMs) {
-        idToFile.set(sessionId, { file, archived, mtimeMs });
+        idToFile.set(sessionId, { file, archived, mtimeMs, sizeBytes });
       }
     }
 
@@ -218,7 +224,7 @@ export class SessionIndex {
     }
 
     // ── Phase 3: Detect moves, new, and changed sessions ─────────────
-    const toEmbed: { id: string; file: string; archived: boolean; mtimeMs: number }[] = [];
+    const toEmbed: { id: string; file: string; archived: boolean; mtimeMs: number; sizeBytes: number }[] = [];
 
     for (const [id, disc] of idToFile.entries()) {
       const existing = this.data.sessions[id];
@@ -226,22 +232,23 @@ export class SessionIndex {
       if (existing) {
         // Session already indexed
         const pathChanged = existing.session.file !== disc.file;
-        const contentChanged = existing.mtimeMs < disc.mtimeMs;
+        const sizeChanged = (existing.sizeBytes ?? 0) !== disc.sizeBytes;
 
-        if (pathChanged && !contentChanged) {
+        if (pathChanged && !sizeChanged) {
           // ── Moved (e.g. sessions/ → sessions-archive/) ──
           // Update file path + archived flag, keep embedding
           existing.session.file = disc.file;
           existing.session.archived = disc.archived;
           existing.mtimeMs = disc.mtimeMs;
+          existing.sizeBytes = disc.sizeBytes;
           existing.summary = buildSummary(existing.session);
           moved++;
-        } else if (contentChanged) {
-          // ── Content changed (active session got new messages) ──
+        } else if (sizeChanged) {
+          // ── Content changed (file size differs) ──
           // Need full re-parse + re-embed
           toEmbed.push({ id, ...disc });
         }
-        // else: unchanged — skip
+        // else: unchanged (same size, same path) — skip
       } else {
         // ── Brand new session ──
         toEmbed.push({ id, ...disc });
@@ -287,6 +294,7 @@ export class SessionIndex {
             summary: buildSummary(session),
             embedding: encodeEmbedding(embedding),
             mtimeMs: item.mtimeMs,
+            sizeBytes: item.sizeBytes,
           };
           this.fts.upsert(item.id, session.name ?? "", buildContent(session));
 

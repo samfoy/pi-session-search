@@ -147,7 +147,7 @@ export function readSessionId(file: string): string | null {
       const bytesRead = readSync(fd, buf, 0, 1024, 0);
       const firstLine = buf.toString("utf8", 0, bytesRead).split("\n")[0];
       if (!firstLine) return null;
-      const obj = JSON.parse(firstLine);
+      const obj = JSON.parse(firstLine.replace(/^\uFEFF/, "").trim());
       return obj.type === "session" ? obj.id : null;
     } finally {
       closeSync(fd);
@@ -160,6 +160,11 @@ export function readSessionId(file: string): string | null {
 // ─── Parsing ─────────────────────────────────────────────────────────
 
 const MAX_ASSISTANT_TEXT = 50_000; // cap assistant text for indexing
+
+/** Strip BOM (U+FEFF) and whitespace from a JSONL line before parsing. */
+function cleanLine(line: string): string {
+  return line.replace(/^\uFEFF/, "").trim();
+}
 
 export function parseSession(
   file: string,
@@ -179,9 +184,10 @@ export function parseSession(
   const entries: SessionEntry[] = [];
 
   for (const line of lines) {
-    if (!line.trim()) continue;
+    const cleaned = cleanLine(line);
+    if (!cleaned) continue;
     try {
-      const obj = JSON.parse(line);
+      const obj = JSON.parse(cleaned);
       if (obj.type === "session") {
         header = obj as SessionHeader;
       } else {

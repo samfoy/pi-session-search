@@ -6,6 +6,7 @@ import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
 import { FtsSessionIndex } from "./fts-index";
 import { readSessionConversation } from "./reader";
+import { resolve } from "node:path";
 
 type AnyIndex = SessionIndex | FtsSessionIndex;
 
@@ -497,6 +498,27 @@ export default function (pi: ExtensionAPI) {
       // Expand ~
       if (filePath.startsWith("~")) {
         filePath = filePath.replace("~", process.env.HOME || "");
+      }
+
+      // Path traversal guard: ensure the resolved path is within known session directories
+      const home = process.env.HOME || "";
+      const allowedRoots = [
+        resolve(home, ".pi", "agent", "sessions"),
+        resolve(home, ".pi", "agent", "sessions-archive"),
+        ...(currentConfig?.extraSessionDirs ?? []).map((d) => resolve(d)),
+        ...(currentConfig?.extraArchiveDirs ?? []).map((d) => resolve(d)),
+      ];
+      const resolvedPath = resolve(filePath);
+      if (!allowedRoots.some((root) => resolvedPath.startsWith(root + "/") || resolvedPath === root)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Access denied: path "${filePath}" is outside the allowed session directories.`,
+            },
+          ],
+          details: {},
+        };
       }
 
       const limit = Math.min(params.limit ?? 50, 100);

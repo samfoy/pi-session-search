@@ -24,9 +24,10 @@ export function readSessionConversation(
   let header: any = null;
 
   for (const line of lines) {
-    if (!line.trim()) continue;
+    const cleaned = line.replace(/^\uFEFF/, "").trim();
+    if (!cleaned) continue;
     try {
-      const obj = JSON.parse(line);
+      const obj = JSON.parse(cleaned);
       if (obj.type === "session") {
         header = obj;
       } else {
