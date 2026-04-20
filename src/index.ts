@@ -100,7 +100,7 @@ export default function (pi: ExtensionAPI) {
 
       // Fire-and-forget: run initial sync in the background so startIndex
       // returns immediately and doesn't block pi's startup.
-      const SYNC_TIMEOUT_MS = 120_000;
+      const SYNC_TIMEOUT_MS = 600_000;
       Promise.race([
         sessionIndex.sync(
           (msg) => ctx.ui.setStatus("session-search", msg)
