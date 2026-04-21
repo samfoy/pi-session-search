@@ -39,7 +39,12 @@ export function loadConfig(): Config | null {
   if (!existsSync(CONFIG_FILE)) return null;
 
   const raw = readFileSync(CONFIG_FILE, "utf8");
-  const file = JSON.parse(raw) as ConfigFile;
+  let file: ConfigFile;
+  try {
+    file = JSON.parse(raw) as ConfigFile;
+  } catch {
+    return null;
+  }
 
   return {
     extraSessionDirs: file.extraSessionDirs ?? [],

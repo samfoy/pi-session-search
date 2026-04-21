@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ParsedSession } from "./parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { SearchResult, ListFilters } from "./session-index";
+import { truncate, buildSummary } from "./utils";
 
 /**
  * SQLite FTS5-backed session index. API-compatible with SessionIndex.
@@ -264,28 +265,6 @@ export function buildContent(s: ParsedSession): string {
   if (s.branchSummaries?.length) parts.push(s.branchSummaries.join("\n"));
   if (s.filesModified?.length) parts.push(s.filesModified.join(" "));
   return parts.join("\n\n");
-}
-
-function buildSummary(s: ParsedSession): string {
-  const name = s.name || truncate(s.firstUserMessage, 80);
-  const date = s.startedAt.split("T")[0];
-  const lines = [
-    `**${name}** (${date})`,
-    `Project: ${s.projectSlug} | CWD: ${s.cwd}`,
-    `Messages: ${s.userMessageCount} user, ${s.assistantMessageCount} assistant`,
-  ];
-  if (s.toolCalls?.length) {
-    lines.push(`Tools: ${s.toolCalls.slice(0, 5).map((t) => `${t.name}(${t.count})`).join(", ")}`);
-  }
-  if (s.filesModified?.length) {
-    lines.push(`Modified: ${s.filesModified.slice(0, 10).join(", ")}`);
-  }
-  if (s.archived) lines.push("(archived)");
-  return lines.join("\n");
-}
-
-function truncate(s: string, max: number): string {
-  return s.length <= max ? s : s.slice(0, max) + "…";
 }
 
 /**

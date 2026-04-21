@@ -344,7 +344,7 @@ function extractPathFromToolResult(_entry: SessionEntry, msg: any): string | nul
   if (msg.details?.diff) {
     // edit tool — path is in the diff header
     const match = msg.details.diff?.match?.(/^  \d+ (.*)/m);
-    // Not reliable, skip
+    if (match) return match[1];
   }
   // Try content for read tool
   if (msg.toolName === "read" && msg.content?.[0]?.text) {

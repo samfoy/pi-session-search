@@ -48,7 +48,7 @@ session_read(session="...", include_tools=true)             # Include tool call 
 
 ## Setup
 
-If not yet configured, run `/session-search-setup` to choose an embedding provider (OpenAI, Bedrock, or Ollama).
+If not yet configured, run `/session-embeddings-setup` to choose an embedding provider (OpenAI, Bedrock, or Ollama).
 
 To force a full re-index, run `/session-reindex`.
 

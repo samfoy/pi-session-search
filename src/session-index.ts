@@ -5,6 +5,7 @@ import type { ParsedSession } from "./parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { Embedder } from "./embedder";
 import { buildContent, toFtsQuery } from "./fts-index";
+import { truncate, slugToProject, buildSummary } from "./utils";
 
 // ─── FTS side-car (for hybrid search) ────────────────────────────────
 
@@ -68,13 +69,13 @@ const INDEX_VERSION = 3;
 // ─── Embedding serialization ─────────────────────────────────────────
 
 /** Encode a float array as base64 Float32Array — ~3x smaller than JSON. */
-function encodeEmbedding(vec: number[]): string {
+export function encodeEmbedding(vec: number[]): string {
   const buf = Buffer.from(new Float32Array(vec).buffer);
   return buf.toString("base64");
 }
 
 /** Decode a base64 Float32Array back to number[]. Also handles legacy JSON arrays. */
-function decodeEmbedding(stored: number[] | string): number[] {
+export function decodeEmbedding(stored: number[] | string): number[] {
   if (Array.isArray(stored)) return stored; // legacy format
   const buf = Buffer.from(stored, "base64");
   return Array.from(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
@@ -476,48 +477,20 @@ export interface ListFilters {
   limit?: number;
 }
 
-// ─── Summary generation ──────────────────────────────────────────────
+// ─── Utilities ───────────────────────────────────────────────────────
 
-function buildSummary(s: ParsedSession): string {
-  const lines: string[] = [];
-  const name = s.name || truncate(s.firstUserMessage, 80);
-  const date = s.startedAt.split("T")[0];
-  const project = slugToProject(s.projectSlug);
-
-  lines.push(`**${name}** (${date})`);
-  lines.push(`Project: ${project} | CWD: ${s.cwd}`);
-  lines.push(
-    `Messages: ${s.userMessageCount} user, ${s.assistantMessageCount} assistant`
-  );
-
-  if (s.models.length > 0) {
-    lines.push(`Models: ${s.models.join(", ")}`);
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0,
+    normA = 0,
+    normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
   }
-
-  if (s.toolCalls.length > 0) {
-    const top = s.toolCalls
-      .slice(0, 5)
-      .map((t) => `${t.name}(${t.count})`)
-      .join(", ");
-    lines.push(`Tools: ${top}`);
-  }
-
-  if (s.filesModified.length > 0) {
-    lines.push(`Modified: ${s.filesModified.slice(0, 10).join(", ")}`);
-  }
-
-  if (s.compactionSummaries.length > 0) {
-    lines.push(`\nCompaction summaries:`);
-    for (const cs of s.compactionSummaries) {
-      lines.push(truncate(cs, 500));
-    }
-  }
-
-  if (s.archived) {
-    lines.push(`(archived)`);
-  }
-
-  return lines.join("\n");
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
 }
 
 /**
@@ -560,32 +533,4 @@ function buildEmbeddingText(s: ParsedSession): string {
 
   // Limit total embedding text
   return parts.join("\n\n").slice(0, 16000);
-}
-
-// ─── Utilities ───────────────────────────────────────────────────────
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0,
-    normA = 0,
-    normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
-}
-
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + "…";
-}
-
-function slugToProject(slug: string): string {
-  if (!slug.startsWith("--") || !slug.endsWith("--")) return slug;
-  return slug
-    .slice(2, -2)
-    .replace(/-/g, "/");
 }
