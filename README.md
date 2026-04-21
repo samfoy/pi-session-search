@@ -10,7 +10,7 @@ Index, summarize, and search past [pi](https://github.com/badlogic/pi-mono) codi
 - **Read conversations** — View the full conversation from any past session (`session_read`)
 - **Auto-indexing** — Parses JSONL session files on startup, tracks changes incrementally
 - **Archive support** — Indexes both `~/.pi/agent/sessions/` and `~/.pi/agent/sessions-archive/`
-- **Multiple embedders** — OpenAI, AWS Bedrock, or local Ollama
+- **Multiple embedders** — OpenAI, Mistral, AWS Bedrock, local Ollama, or any OpenAI-compatible API
 
 ## Install
 
@@ -35,10 +35,30 @@ Requires **Node 22.5+** (`node:sqlite` is used for FTS5). Node 24+ is recommende
 To enable hybrid search (keyword + semantic), run `/session-embeddings-setup` in pi to configure an embedding provider:
 
 - **OpenAI** — Uses `text-embedding-3-small` (needs `OPENAI_API_KEY`)
+- **Mistral** — Uses `mistral-embed` (needs `MISTRAL_API_KEY`)
 - **Bedrock** — Uses Titan Embeddings v2 (needs AWS credentials)
 - **Ollama** — Uses `nomic-embed-text` (needs local Ollama running)
+- **OpenAI-compatible** — Any provider with a `/v1/embeddings` endpoint (Together, Fireworks, vLLM, LiteLLM, etc.)
 
 Config is stored at `~/.pi/session-search/config.json`. The `embedder` field is optional — omit it for FTS5-only mode.
+
+### OpenAI-compatible providers
+
+Many embedding providers expose an OpenAI-compatible `/v1/embeddings` endpoint. Use `"type": "openai-compatible"` with a `baseUrl`:
+
+```json
+{
+  "embedder": {
+    "type": "openai-compatible",
+    "baseUrl": "https://api.together.xyz",
+    "apiKey": "your-key",
+    "model": "togethercomputer/m2-bert-80M-8k-retrieval",
+    "dimensions": 768
+  }
+}
+```
+
+This works with Together, Fireworks, vLLM, LiteLLM, Anyscale, and any other provider that implements the OpenAI embeddings format.
 
 ## Usage
 
@@ -104,6 +124,7 @@ Tested against a 2,159-session corpus: hybrid surfaces **75% more relevant docum
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_API_KEY` | Required for OpenAI embedder |
+| `MISTRAL_API_KEY` | Required for Mistral embedder |
 
 ## License
 

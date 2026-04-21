@@ -12,10 +12,11 @@ export interface Embedder {
 }
 
 export interface EmbedderConfig {
-  type: "openai" | "bedrock" | "ollama";
-  // OpenAI
+  type: "openai" | "bedrock" | "ollama" | "mistral" | "openai-compatible";
+  // OpenAI / Mistral / OpenAI-compatible
   apiKey?: string;
   model?: string;
+  baseUrl?: string;
   // Bedrock
   profile?: string;
   region?: string;
@@ -26,7 +27,7 @@ export interface EmbedderConfig {
 }
 
 const DEFAULTS: Record<string, Partial<EmbedderConfig>> = {
-  openai: { model: "text-embedding-3-small", dimensions: 512 },
+  openai: { model: "text-embedding-3-small", dimensions: 512, baseUrl: "https://api.openai.com" },
   bedrock: {
     model: "amazon.titan-embed-text-v2:0",
     region: "us-east-1",
@@ -34,6 +35,8 @@ const DEFAULTS: Record<string, Partial<EmbedderConfig>> = {
     dimensions: 512,
   },
   ollama: { model: "nomic-embed-text", url: "http://localhost:11434" },
+  mistral: { model: "mistral-embed", dimensions: 1024, baseUrl: "https://api.mistral.ai" },
+  "openai-compatible": { model: "text-embedding-3-small", dimensions: 512 },
 };
 
 export function createEmbedder(config: EmbedderConfig): Embedder {
@@ -42,11 +45,28 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
 
   switch (merged.type) {
     case "openai":
-      return new OpenAIEmbedder(
+      return new OpenAICompatibleEmbedder(
         merged.apiKey || process.env.OPENAI_API_KEY || "",
         merged.model!,
-        merged.dimensions!
+        merged.dimensions!,
+        merged.baseUrl || "https://api.openai.com"
       );
+    case "mistral":
+      return new OpenAICompatibleEmbedder(
+        merged.apiKey || process.env.MISTRAL_API_KEY || "",
+        merged.model!,
+        merged.dimensions!,
+        merged.baseUrl || "https://api.mistral.ai"
+      );
+    case "openai-compatible": {
+      if (!merged.baseUrl) throw new Error("openai-compatible requires baseUrl");
+      return new OpenAICompatibleEmbedder(
+        merged.apiKey || "",
+        merged.model!,
+        merged.dimensions!,
+        merged.baseUrl
+      );
+    }
     case "bedrock":
       return new BedrockEmbedder(
         merged.profile!,
@@ -88,14 +108,19 @@ async function parallelMap<T, R>(
   return results;
 }
 
-// ─── OpenAI ──────────────────────────────────────────────────────────
+// ─── OpenAI-Compatible (OpenAI, Mistral, Together, Fireworks, etc.) ──
 
-class OpenAIEmbedder implements Embedder {
+class OpenAICompatibleEmbedder implements Embedder {
+  private endpoint: string;
+
   constructor(
     private apiKey: string,
     private model: string,
-    private dimensions: number
-  ) {}
+    private dimensions: number,
+    baseUrl: string
+  ) {
+    this.endpoint = `${baseUrl.replace(/\/$/, "")}/v1/embeddings`;
+  }
 
   async embed(text: string, signal?: AbortSignal): Promise<number[]> {
     const [result] = await this.embedBatch([text], signal);
@@ -114,23 +139,28 @@ class OpenAIEmbedder implements Embedder {
       if (signal?.aborted) throw new Error("Aborted");
       const batch = texts.slice(i, i + BATCH).map((t) => truncate(t));
 
-      const res = await fetch("https://api.openai.com/v1/embeddings", {
+      const body: Record<string, unknown> = {
+        input: batch,
+        model: this.model,
+      };
+      // Mistral doesn't support the dimensions parameter
+      if (this.dimensions && !this.endpoint.includes("mistral.ai")) {
+        body.dimensions = this.dimensions;
+      }
+
+      const res = await fetch(this.endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          input: batch,
-          model: this.model,
-          dimensions: this.dimensions,
-        }),
+        body: JSON.stringify(body),
         signal,
       });
 
       if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`OpenAI ${res.status}: ${body.slice(0, 200)}`);
+        const errBody = await res.text();
+        throw new Error(`Embeddings API ${res.status}: ${errBody.slice(0, 200)}`);
       }
 
       const json = (await res.json()) as {

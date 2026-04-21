@@ -180,8 +180,10 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const providerChoice = await ctx.ui.select("Embedding provider:", [
         "openai — OpenAI API (text-embedding-3-small)",
+        "mistral — Mistral API (mistral-embed)",
         "bedrock — AWS Bedrock (Titan Embeddings v2)",
         "ollama — Local Ollama (nomic-embed-text)",
+        "openai-compatible — Any OpenAI-compatible API",
       ]);
 
       if (!providerChoice) {
@@ -191,8 +193,10 @@ export default function (pi: ExtensionAPI) {
 
       const providerType = providerChoice.split(" ")[0] as
         | "openai"
+        | "mistral"
         | "bedrock"
-        | "ollama";
+        | "ollama"
+        | "openai-compatible";
 
       let embedder: any;
 
@@ -211,6 +215,23 @@ export default function (pi: ExtensionAPI) {
             apiKey: apiKey?.startsWith("(") ? undefined : apiKey || undefined,
             model: model || "text-embedding-3-small",
             dimensions: 512,
+          };
+          break;
+        }
+        case "mistral": {
+          const apiKey = await ctx.ui.input(
+            "Mistral API key:",
+            process.env.MISTRAL_API_KEY ? "(using MISTRAL_API_KEY from env)" : ""
+          );
+          const model = await ctx.ui.input(
+            "Model:",
+            "mistral-embed"
+          );
+          embedder = {
+            type: "mistral" as const,
+            apiKey: apiKey?.startsWith("(") ? undefined : apiKey || undefined,
+            model: model || "mistral-embed",
+            dimensions: 1024,
           };
           break;
         }
@@ -240,6 +261,27 @@ export default function (pi: ExtensionAPI) {
             type: "ollama" as const,
             url: url || "http://localhost:11434",
             model: model || "nomic-embed-text",
+          };
+          break;
+        }
+        case "openai-compatible": {
+          const baseUrl = await ctx.ui.input(
+            "Base URL (e.g. https://api.together.xyz):",
+            ""
+          );
+          if (!baseUrl) {
+            ctx.ui.notify("Base URL is required for openai-compatible.", "warning");
+            return;
+          }
+          const apiKey = await ctx.ui.input("API key:", "");
+          const model = await ctx.ui.input("Model:", "");
+          const dims = await ctx.ui.input("Dimensions (e.g. 512, 1024):", "512");
+          embedder = {
+            type: "openai-compatible" as const,
+            baseUrl: baseUrl.replace(/\/$/, ""),
+            apiKey: apiKey || undefined,
+            model: model || undefined,
+            dimensions: parseInt(dims || "512", 10),
           };
           break;
         }
