@@ -14,6 +14,14 @@ Index, summarize, and search past [pi](https://github.com/badlogic/pi-mono) codi
 
 ## Install
 
+**Recommended:** Install [pi-total-recall](https://github.com/samfoy/pi-total-recall) to get the complete context stack — persistent memory, session history search, and local knowledge search in one package:
+
+```bash
+pi install pi-total-recall
+```
+
+Or install pi-session-search standalone:
+
 ```bash
 pi install pi-session-search
 ```
