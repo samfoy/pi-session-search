@@ -15,8 +15,30 @@ export default function (pi: ExtensionAPI) {
   let sessionIndex: AnyIndex | null = null;
   let currentConfig: Config | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
+  let statusTimers: ReturnType<typeof setTimeout>[] = [];
+  let isActive = true;
 
   const SYNC_INTERVAL_MS = 5 * 60 * 1000; // re-sync every 5 minutes
+
+  /** Safe wrapper: only calls ctx.ui methods while the extension is still active */
+  function safeSetStatus(ctx: any, key: string, msg: string) {
+    if (!isActive) return;
+    try { ctx.ui.setStatus(key, msg); } catch { isActive = false; }
+  }
+
+  function safeNotify(ctx: any, msg: string, level: string) {
+    if (!isActive) return;
+    try { ctx.ui.notify(msg, level); } catch { isActive = false; }
+  }
+
+  /** Schedule a status clear that auto-cancels on shutdown */
+  function scheduleClearStatus(ctx: any, key: string, delayMs: number) {
+    const id = setTimeout(() => {
+      safeSetStatus(ctx, key, "");
+      statusTimers = statusTimers.filter((t) => t !== id);
+    }, delayMs);
+    statusTimers.push(id);
+  }
 
   // ------------------------------------------------------------------
   // Lifecycle
@@ -70,10 +92,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    isActive = true;
     try {
       currentConfig = loadConfig();
     } catch (err: any) {
-      ctx.ui.notify(`session-search: ${err.message}`, "warning");
+      safeNotify(ctx, `session-search: ${err.message}`, "warning");
     }
 
     // FTS5 works out of the box with no config; embeddings are optional.
@@ -104,14 +127,14 @@ export default function (pi: ExtensionAPI) {
       const SYNC_TIMEOUT_MS = 600_000;
       Promise.race([
         sessionIndex.sync(
-          (msg) => ctx.ui.setStatus("session-search", msg)
+          (msg) => safeSetStatus(ctx, "session-search", msg)
         ),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_TIMEOUT_MS)),
       ])
         .then((syncResult) => {
           if (syncResult === null) {
-            ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
-            ctx.ui.setStatus("session-search", "");
+            safeNotify(ctx, "session-search: sync timed out (index may be stale)", "warning");
+            safeSetStatus(ctx, "session-search", "");
           } else {
             const { added, updated, removed, moved } = syncResult;
             const changes = added + updated + removed + moved;
@@ -121,22 +144,23 @@ export default function (pi: ExtensionAPI) {
               if (updated) parts.push(`~${updated}`);
               if (removed) parts.push(`-${removed}`);
               if (moved) parts.push(`↗${moved} moved`);
-              ctx.ui.setStatus(
+              safeSetStatus(
+                ctx,
                 "session-search",
                 `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`
               );
-              setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
+              scheduleClearStatus(ctx, "session-search", 5000);
             }
           }
         })
         .catch((err) => {
-          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-          ctx.ui.setStatus("session-search", "");
+          safeNotify(ctx, `session-search: initial sync failed: ${err.message}`, "warning");
+          safeSetStatus(ctx, "session-search", "");
         });
 
       // Periodic background sync to pick up new/changed sessions
       syncTimer = setInterval(async () => {
-        if (!sessionIndex) return;
+        if (!sessionIndex || !isActive) return;
         try {
           const result = await sessionIndex.sync();
           const changes = result.added + result.updated + result.removed + result.moved;
@@ -146,26 +170,30 @@ export default function (pi: ExtensionAPI) {
             if (result.updated) parts.push(`~${result.updated}`);
             if (result.removed) parts.push(`-${result.removed}`);
             if (result.moved) parts.push(`↗${result.moved} moved`);
-            ctx.ui.setStatus(
+            safeSetStatus(
+              ctx,
               "session-search",
               `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
             );
-            setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
+            scheduleClearStatus(ctx, "session-search", 5000);
           }
         } catch {
           // Silent — don't spam on background sync failures
         }
       }, SYNC_INTERVAL_MS);
     } catch (err: any) {
-      ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
+      safeNotify(ctx, `session-search init failed: ${err.message}`, "error");
     }
   }
 
   pi.on("session_shutdown", async () => {
+    isActive = false;
     if (syncTimer) {
       clearInterval(syncTimer);
       syncTimer = null;
     }
+    for (const t of statusTimers) clearTimeout(t);
+    statusTimers = [];
     if (sessionIndex && "close" in sessionIndex) {
       (sessionIndex as any).close();
     }
