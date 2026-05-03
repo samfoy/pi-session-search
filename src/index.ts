@@ -15,6 +15,7 @@ export default function (pi: ExtensionAPI) {
   let sessionIndex: AnyIndex | null = null;
   let currentConfig: Config | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
+  let sessionCwd: string | undefined;
 
   const SYNC_INTERVAL_MS = 5 * 60 * 1000; // re-sync every 5 minutes
 
@@ -70,8 +71,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    sessionCwd = ctx.cwd;
     try {
-      currentConfig = loadConfig();
+      currentConfig = loadConfig(sessionCwd);
     } catch (err: any) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
     }
@@ -86,13 +88,13 @@ export default function (pi: ExtensionAPI) {
         const embedder = createEmbedder(config.embedder);
         sessionIndex = new SessionIndex(
           embedder,
-          getIndexDir(),
+          getIndexDir(sessionCwd),
           config.extraSessionDirs,
           config.extraArchiveDirs,
         );
       } else {
         sessionIndex = new FtsSessionIndex(
-          getIndexDir(),
+          getIndexDir(sessionCwd),
           config?.extraSessionDirs ?? [],
           config?.extraArchiveDirs ?? [],
         );
@@ -305,10 +307,10 @@ export default function (pi: ExtensionAPI) {
         extraArchiveDirs: extraArchive
           ? extraArchive.split(",").map((d: string) => d.trim()).filter(Boolean)
           : undefined,
-      });
+      }, sessionCwd);
 
       ctx.ui.notify(
-        `Config saved to ${getConfigPath()}. Run /reload to activate.`,
+        `Config saved to ${getConfigPath(sessionCwd)}. Run /reload to activate.`,
         "success"
       );
     },

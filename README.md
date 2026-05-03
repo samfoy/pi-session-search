@@ -134,6 +134,37 @@ Tested against a 2,159-session corpus: hybrid surfaces **75% more relevant docum
 | `OPENAI_API_KEY` | Required for OpenAI embedder |
 | `MISTRAL_API_KEY` | Required for Mistral embedder |
 
+## Project-local storage
+
+By default, config lives at `~/.pi/session-search/config.json` and the index at `~/.pi/session-search/index/`. To relocate both per-project, add one of the following to `{project}/.pi/settings.json`:
+
+```jsonc
+{
+  "pi-session-search": {
+    "localPath": ".pi/session-search"   // config.json + index/ under this path
+  }
+}
+```
+
+Or via the [`pi-total-recall`](https://github.com/samfoy/pi-total-recall) cascade:
+
+```jsonc
+{
+  "pi-total-recall": {
+    "localPath": ".pi/total-recall"
+    // pi-session-search → {project}/.pi/total-recall/session-search/
+  }
+}
+```
+
+**Resolution order:**
+
+1. `pi-session-search.localPath` in `{cwd}/.pi/settings.json`
+2. `pi-total-recall.localPath` cascade → `{localPath}/session-search/`
+3. Global default: `~/.pi/session-search/`
+
+> **Note:** Only the config and index are relocated. The session *source* directories (`~/.pi/agent/sessions` and `~/.pi/agent/sessions-archive`) are pi's own files and stay global — that's where the session data actually lives. Use the `project` filter on `session_search` and `session_list` if you want to scope results to one project.
+
 ## License
 
 MIT
