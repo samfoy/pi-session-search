@@ -30,15 +30,29 @@ class FtsSide {
   count(): number {
     return (this.db.prepare("SELECT count(*) as c FROM s").get() as any).c;
   }
-  /** Returns id→rank map (rank starts at 1, best first). */
-  searchRanks(q: string, limit: number): Map<string, number> {
+  /**
+   * Returns id→rank map (rank starts at 1, best first).
+   *
+   * When `allowedIds` is provided, non-matching IDs are skipped and the rank
+   * is assigned from the filtered subset. A larger pool is pulled from SQLite
+   * to compensate for the filtering.
+   */
+  searchRanks(q: string, limit: number, allowedIds?: Set<string>): Map<string, number> {
     const fts = toFtsQuery(q);
     const out = new Map<string, number>();
     if (!fts) return out;
+    // Pull a larger pool when filtering so the final set has enough candidates.
+    const pullLimit = allowedIds ? Math.max(limit * 5, 500) : limit;
     const rows = this.db
       .prepare("SELECT id FROM s WHERE s MATCH ? ORDER BY bm25(s) LIMIT ?")
-      .all(fts, limit) as any[];
-    rows.forEach((r, i) => out.set(String(r.id), i + 1));
+      .all(fts, pullLimit) as any[];
+    let rank = 1;
+    for (const r of rows) {
+      const id = String(r.id);
+      if (allowedIds && !allowedIds.has(id)) continue;
+      out.set(id, rank++);
+      if (out.size >= limit) break;
+    }
     return out;
   }
 }
@@ -354,14 +368,30 @@ export class SessionIndex {
   /**
    * Hybrid search: cosine embeddings + FTS5 BM25, fused via Reciprocal Rank
    * Fusion (k=60). Falls back to pure semantic if FTS side-car is empty.
+   *
+   * Optional `project` filter matches the same way as `list()`: case-insensitive
+   * substring match against projectSlug or cwd.
    */
   async search(
     query: string,
     limit: number = 10,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    project?: string
   ): Promise<SearchResult[]> {
-    const entries = Object.values(this.data.sessions);
+    let entries = Object.values(this.data.sessions);
     if (entries.length === 0) return [];
+
+    let allowedIds: Set<string> | undefined;
+    if (project) {
+      const slug = project.toLowerCase();
+      entries = entries.filter(
+        (e) =>
+          e.session.projectSlug.toLowerCase().includes(slug) ||
+          e.session.cwd.toLowerCase().includes(slug)
+      );
+      if (entries.length === 0) return [];
+      allowedIds = new Set(entries.map((e) => e.session.id));
+    }
 
     const queryEmbedding = await this.embedder.embed(query);
     if (signal?.aborted) return [];
@@ -381,7 +411,7 @@ export class SessionIndex {
       cosineRanks.set(s.entry.session.id, i + 1);
     });
 
-    const ftsRanks = this.fts.searchRanks(query, poolSize);
+    const ftsRanks = this.fts.searchRanks(query, poolSize, allowedIds);
 
     // RRF fusion: score = Σ 1 / (k + rank)
     const K = 60;

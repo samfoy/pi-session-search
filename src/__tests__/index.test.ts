@@ -5,7 +5,7 @@ import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 
 // ─── Imports under test ──────────────────────────────────────────────
 
-import { toFtsQuery, buildContent } from "../fts-index";
+import { toFtsQuery, buildContent, FtsSessionIndex } from "../fts-index";
 import { parseSession } from "../parser";
 import { encodeEmbedding, decodeEmbedding } from "../session-index";
 import { loadConfig } from "../config";
@@ -358,5 +358,143 @@ describe("pathToSlug", () => {
   it("handles paths not under HOME", () => {
     const slug = pathToSlug("/tmp/some/project");
     assert.equal(slug, "-tmp-some-project");
+  });
+});
+
+// ─── FtsSessionIndex.search project filter ────────────────────────────────
+// Exercises the optional `project` filter on session_search end-to-end using
+// the FTS-only backend (no embedder required).
+
+describe("FtsSessionIndex.search with project filter", () => {
+  const tmpRoot = join(import.meta.dirname ?? __dirname, "__tmp_search_filter__");
+  const projADir = join(tmpRoot, "sessions", "--tmp-project-alpha--");
+  const projBDir = join(tmpRoot, "sessions", "--tmp-project-beta--");
+  const indexDir = join(tmpRoot, "index");
+
+  function writeSession(dir: string, id: string, cwd: string, userMsg: string): string {
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${id}.jsonl`);
+    const lines = [
+      JSON.stringify({
+        type: "session",
+        version: 1,
+        id,
+        timestamp: "2026-01-15T10:00:00Z",
+        cwd,
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-01-15T10:00:01Z",
+        message: { role: "user", content: [{ type: "text", text: userMsg }] },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "m2",
+        parentId: "m1",
+        timestamp: "2026-01-15T10:00:05Z",
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "claude-sonnet",
+          content: [{ type: "text", text: "ok" }],
+        },
+      }),
+    ];
+    writeFileSync(file, lines.join("\n"), "utf8");
+    return file;
+  }
+
+  async function buildIndex(): Promise<FtsSessionIndex> {
+    writeSession(projADir, "alpha-001", "/tmp/project-alpha", "refactor the authentication flow in alpha");
+    writeSession(projBDir, "beta-001",  "/tmp/project-beta",  "refactor the authentication flow in beta");
+    writeSession(projBDir, "beta-002",  "/tmp/project-beta",  "debug a totally unrelated lambda timeout");
+    const idx = new FtsSessionIndex(indexDir, [join(tmpRoot, "sessions")], []);
+    await idx.load();
+    await idx.sync();
+    return idx;
+  }
+
+  it("returns sessions from all projects when no filter is provided", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const idx = await buildIndex();
+    try {
+      const results = await idx.search("authentication", 50);
+      const ids = new Set(results.map((r) => r.session.id));
+      // Our two test sessions that match "authentication" must both be present.
+      // (There may be additional real-world sessions indexed from ~/.pi/agent/sessions;
+      // the key property under test is that no project filter ⇒ no project pruning.)
+      assert.ok(ids.has("alpha-001"), "expected alpha-001 in unfiltered results");
+      assert.ok(ids.has("beta-001"),  "expected beta-001 in unfiltered results");
+    } finally {
+      idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("filters by project slug substring", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const idx = await buildIndex();
+    try {
+      const results = await idx.search("authentication", 10, undefined, "alpha");
+      assert.equal(results.length, 1);
+      assert.equal(results[0].session.id, "alpha-001");
+    } finally {
+      idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("filters by cwd substring", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const idx = await buildIndex();
+    try {
+      const results = await idx.search("authentication", 10, undefined, "/tmp/project-beta");
+      assert.equal(results.length, 1);
+      assert.equal(results[0].session.id, "beta-001");
+    } finally {
+      idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("is case-insensitive on the project filter", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const idx = await buildIndex();
+    try {
+      const results = await idx.search("authentication", 10, undefined, "ALPHA");
+      assert.equal(results.length, 1);
+      assert.equal(results[0].session.id, "alpha-001");
+    } finally {
+      idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns an empty array when no sessions match the project filter", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const idx = await buildIndex();
+    try {
+      const results = await idx.search("authentication", 10, undefined, "nonexistent-project");
+      assert.deepEqual(results, []);
+    } finally {
+      idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cross-match unrelated content inside the filtered project", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    const idx = await buildIndex();
+    try {
+      // beta-002 is about lambda, not auth — scoping to beta+auth must exclude it
+      const results = await idx.search("authentication", 10, undefined, "beta");
+      assert.equal(results.length, 1);
+      assert.equal(results[0].session.id, "beta-001");
+    } finally {
+      idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
