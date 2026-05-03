@@ -193,14 +193,18 @@ export class FtsSessionIndex {
     await this.sync(onProgress);
   }
 
-  async search(query: string, limit = 10, _signal?: AbortSignal): Promise<SearchResult[]> {
+  async search(query: string, limit = 10, _signal?: AbortSignal, project?: string): Promise<SearchResult[]> {
     const fts = toFtsQuery(query);
     if (!fts) return [];
-    const rows = this.db
-      .prepare(
-        "SELECT json, summary, bm25(sessions) AS score FROM sessions WHERE sessions MATCH ? ORDER BY score LIMIT ?",
-      )
-      .all(fts, limit) as any[];
+    const clauses: string[] = ["sessions MATCH ?"];
+    const args: any[] = [fts];
+    if (project) {
+      clauses.push("(lower(projectSlug) LIKE ? OR lower(cwd) LIKE ?)");
+      const p = `%${project.toLowerCase()}%`;
+      args.push(p, p);
+    }
+    const sql = `SELECT json, summary, bm25(sessions) AS score FROM sessions WHERE ${clauses.join(" AND ")} ORDER BY score LIMIT ?`;
+    const rows = this.db.prepare(sql).all(...args, limit) as any[];
     return rows.map((r) => {
       const session = JSON.parse(String(r.json)) as ParsedSession;
       // Normalize BM25 (lower is better) into a 0..1-ish relevance score for display

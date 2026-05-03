@@ -386,10 +386,17 @@ export default function (pi: ExtensionAPI) {
       "Semantic search over past pi sessions — find previous work, decisions, and context by topic.",
     promptGuidelines: [
       "Use session_search to find past coding sessions relevant to the current task (e.g. 'when did we refactor the auth module', 'previous work on Lambda timeouts').",
+      "Pass the optional `project` parameter to limit search to a single project — use a substring of the project path or slug (e.g. 'pi-session-search').",
       "Use session_list for browsing by date/project. Use session_read to dive into a specific session.",
     ],
     parameters: Type.Object({
       query: Type.String({ description: "Natural language search query" }),
+      project: Type.Optional(
+        Type.String({
+          description:
+            "Filter by project name or path substring (matches projectSlug or cwd, same semantics as session_list)",
+        })
+      ),
       limit: Type.Optional(
         Type.Number({
           description: "Max results to return (default 10, max 25)",
@@ -407,14 +414,15 @@ export default function (pi: ExtensionAPI) {
       const limit = Math.min(params.limit ?? 10, 25);
 
       try {
-        const results = await sessionIndex.search(params.query, limit, signal);
+        const results = await sessionIndex.search(params.query, limit, signal, params.project);
 
         if (results.length === 0) {
+          const scope = params.project ? ` in project "${params.project}"` : "";
           return {
             content: [
               {
                 type: "text",
-                text: `No relevant sessions found for: "${params.query}"`,
+                text: `No relevant sessions found for: "${params.query}"${scope}`,
               },
             ],
             details: {},
@@ -436,11 +444,12 @@ export default function (pi: ExtensionAPI) {
           })
           .join("\n\n---\n\n");
 
-        const header = `Found ${results.length} sessions for "${params.query}" (${sessionIndex.size()} sessions indexed):\n\n`;
+        const scopeNote = params.project ? ` scoped to "${params.project}"` : "";
+        const header = `Found ${results.length} sessions for "${params.query}"${scopeNote} (${sessionIndex.size()} sessions indexed):\n\n`;
 
         return {
           content: [{ type: "text", text: header + output }],
-          details: { resultCount: results.length, indexSize: sessionIndex.size() },
+          details: { resultCount: results.length, indexSize: sessionIndex.size(), project: params.project },
         };
       } catch (err: any) {
         throw new Error(`session-search failed: ${err.message}`);
