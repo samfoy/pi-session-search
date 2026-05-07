@@ -17,6 +17,31 @@ export default function (pi: ExtensionAPI) {
   let syncTimer: ReturnType<typeof setInterval> | null = null;
   let sessionCwd: string | undefined;
 
+  // Track one-shot timers so session_shutdown can clear them. Without this,
+  // deferred callbacks fire after teardown, touch ctx.ui, and hit
+  // assertActive() — crashing `pi -p --no-session` on exit. (issue #8)
+  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+  let shuttingDown = false;
+
+  /**
+   * setTimeout wrapper that registers the handle for shutdown cancellation
+   * and guards the callback against a stale ctx.
+   */
+  function scheduleTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const handle = setTimeout(() => {
+      pendingTimers.delete(handle);
+      if (shuttingDown) return;
+      try {
+        fn();
+      } catch {
+        // ctx may have gone stale between the shuttingDown check and fn() —
+        // swallow so we don't crash the process on exit.
+      }
+    }, ms);
+    pendingTimers.add(handle);
+    return handle;
+  }
+
   const SYNC_INTERVAL_MS = 5 * 60 * 1000; // re-sync every 5 minutes
 
   // ------------------------------------------------------------------
@@ -108,9 +133,10 @@ export default function (pi: ExtensionAPI) {
         sessionIndex.sync(
           (msg) => ctx.ui.setStatus("session-search", msg)
         ),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_TIMEOUT_MS)),
+        new Promise<null>((resolve) => scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS)),
       ])
         .then((syncResult) => {
+          if (shuttingDown) return;
           if (syncResult === null) {
             ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
             ctx.ui.setStatus("session-search", "");
@@ -127,20 +153,22 @@ export default function (pi: ExtensionAPI) {
                 "session-search",
                 `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`
               );
-              setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
+              scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
             }
           }
         })
         .catch((err) => {
+          if (shuttingDown) return;
           ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
           ctx.ui.setStatus("session-search", "");
         });
 
       // Periodic background sync to pick up new/changed sessions
       syncTimer = setInterval(async () => {
-        if (!sessionIndex) return;
+        if (!sessionIndex || shuttingDown) return;
         try {
           const result = await sessionIndex.sync();
+          if (shuttingDown) return;
           const changes = result.added + result.updated + result.removed + result.moved;
           if (changes > 0) {
             const parts = [];
@@ -152,7 +180,7 @@ export default function (pi: ExtensionAPI) {
               "session-search",
               `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
             );
-            setTimeout(() => ctx.ui.setStatus("session-search", ""), 5000);
+            scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
           }
         } catch {
           // Silent — don't spam on background sync failures
@@ -164,10 +192,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_shutdown", async () => {
+    shuttingDown = true;
     if (syncTimer) {
       clearInterval(syncTimer);
       syncTimer = null;
     }
+    for (const handle of pendingTimers) {
+      clearTimeout(handle);
+    }
+    pendingTimers.clear();
     if (sessionIndex && "close" in sessionIndex) {
       (sessionIndex as any).close();
     }
