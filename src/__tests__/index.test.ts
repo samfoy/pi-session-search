@@ -14,12 +14,12 @@ import { truncate, slugToProject, buildSummary, formatRelativeDate, pathToSlug }
 // ─── toFtsQuery ──────────────────────────────────────────────────────
 
 describe("toFtsQuery", () => {
-  it("wraps simple terms in quotes", () => {
-    assert.equal(toFtsQuery("hello world"), '"hello" "world"');
+  it("wraps simple terms in quotes joined with OR", () => {
+    assert.equal(toFtsQuery("hello world"), '"hello" OR "world"');
   });
 
   it("strips special FTS characters", () => {
-    assert.equal(toFtsQuery('hello "world" {foo}'), '"hello" "world" "foo"');
+    assert.equal(toFtsQuery('hello "world" {foo}'), '"hello" OR "world" OR "foo"');
   });
 
   it("returns empty string for empty input", () => {
@@ -35,7 +35,7 @@ describe("toFtsQuery", () => {
   });
 
   it("strips brackets, parens, colons, carets, asterisks", () => {
-    assert.equal(toFtsQuery("foo:bar [baz] (qux) ^hey *wild"), '"foo" "bar" "baz" "qux" "hey" "wild"');
+    assert.equal(toFtsQuery("foo:bar [baz] (qux) ^hey *wild"), '"foo" OR "bar" OR "baz" OR "qux" OR "hey" OR "wild"');
   });
 });
 

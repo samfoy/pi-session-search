@@ -273,9 +273,12 @@ export function buildContent(s: ParsedSession): string {
 
 /**
  * Turn a user query into a safe FTS5 MATCH expression.
- * Strips FTS syntax characters, quotes each term, and joins with implicit AND.
- * AND is more precise than OR — BM25 ranks multi-term matches highest, and
- * sessions missing a term are excluded rather than diluting the result set.
+ * Strips FTS syntax characters, quotes each term, and joins with OR.
+ *
+ * OR rather than AND: BM25 already ranks docs matching more terms higher, so
+ * OR preserves recall (partial matches stay in the result set) without
+ * sacrificing relevance. In hybrid mode FTS is fused with vector search via
+ * RRF — we want FTS to surface candidates, not hard-exclude them.
  */
 export function toFtsQuery(q: string): string {
   const terms = q
@@ -284,5 +287,5 @@ export function toFtsQuery(q: string): string {
     .map((t) => t.trim())
     .filter((t) => t.length > 0)
     .map((t) => `"${t}"`);
-  return terms.join(" "); // implicit AND in FTS5
+  return terms.join(" OR ");
 }
