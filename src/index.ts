@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
-import type { Config } from "./config";
+import type { Config, ConfigFile, SyncConfig } from "./config";
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
 import { FtsSessionIndex } from "./fts-index";
@@ -42,7 +42,9 @@ export default function (pi: ExtensionAPI) {
     return handle;
   }
 
-  const SYNC_INTERVAL_MS = 5 * 60 * 1000; // re-sync every 5 minutes
+  // resolved from config at session_start; -1 means auto-sync disabled
+  const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+  let effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
 
   // ------------------------------------------------------------------
   // Lifecycle
@@ -102,6 +104,9 @@ export default function (pi: ExtensionAPI) {
     } catch (err: any) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
     }
+
+      // Apply configurable sync interval (from nested sync.intervalMs)
+    effectiveSyncIntervalMs = currentConfig?.sync?.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
     // FTS5 works out of the box with no config; embeddings are optional.
     void startIndex(currentConfig, ctx);
@@ -164,28 +169,31 @@ export default function (pi: ExtensionAPI) {
         });
 
       // Periodic background sync to pick up new/changed sessions
-      syncTimer = setInterval(async () => {
-        if (!sessionIndex || shuttingDown) return;
-        try {
-          const result = await sessionIndex.sync();
-          if (shuttingDown) return;
-          const changes = result.added + result.updated + result.removed + result.moved;
-          if (changes > 0) {
-            const parts = [];
-            if (result.added) parts.push(`+${result.added}`);
-            if (result.updated) parts.push(`~${result.updated}`);
-            if (result.removed) parts.push(`-${result.removed}`);
-            if (result.moved) parts.push(`↗${result.moved} moved`);
-            ctx.ui.setStatus(
-              "session-search",
-              `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
-            );
-            scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
+      // (skipped when effectiveSyncIntervalMs is -1, i.e. auto-sync disabled)
+      if (effectiveSyncIntervalMs > 0) {
+        syncTimer = setInterval(async () => {
+          if (!sessionIndex || shuttingDown) return;
+          try {
+            const result = await sessionIndex.sync();
+            if (shuttingDown) return;
+            const changes = result.added + result.updated + result.removed + result.moved;
+            if (changes > 0) {
+              const parts = [];
+              if (result.added) parts.push(`+${result.added}`);
+              if (result.updated) parts.push(`~${result.updated}`);
+              if (result.removed) parts.push(`-${result.removed}`);
+              if (result.moved) parts.push(`↗${result.moved} moved`);
+              ctx.ui.setStatus(
+                "session-search",
+                `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
+              );
+              scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
+            }
+          } catch {
+            // Silent — don't spam on background sync failures
           }
-        } catch {
-          // Silent — don't spam on background sync failures
-        }
-      }, SYNC_INTERVAL_MS);
+        }, effectiveSyncIntervalMs);
+      }
     } catch (err: any) {
       ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
     }

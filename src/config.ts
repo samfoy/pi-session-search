@@ -4,11 +4,24 @@ import type { EmbedderConfig } from "./embedder";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
+const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Sync behaviour configuration. Mirrors EmbedderConfig nesting pattern. */
+export interface SyncConfig {
+  /**
+   * Interval (ms) between automatic session index re-syncs.
+   * Default: 300000 (5 min). Use -1 to disable background auto-sync entirely.
+   */
+  intervalMs: number;
+}
+
 export interface Config {
   /** Extra session directories to scan (in addition to default) */
   extraSessionDirs: string[];
   /** Extra archive directories to scan (in addition to default) */
   extraArchiveDirs: string[];
+  /** Optional sync configuration — controls periodic re-sync behaviour. */
+  sync?: SyncConfig;
   /** Optional embedder configuration — enables hybrid search when set */
   embedder?: EmbedderConfig;
 }
@@ -16,6 +29,11 @@ export interface Config {
 export interface ConfigFile {
   extraSessionDirs?: string[];
   extraArchiveDirs?: string[];
+  /** Nested sync settings. */
+  sync?: {
+    /** Interval in ms; -1 disables auto-sync. */
+    intervalMs?: number;
+  };
   embedder?: EmbedderConfig;
 }
 
@@ -97,9 +115,16 @@ export function loadConfig(cwd?: string): Config | null {
     return null;
   }
 
+  const rawInterval = file.sync?.intervalMs;
+  let syncCfg: SyncConfig | undefined;
+  if (typeof rawInterval === "number") {
+    syncCfg = { intervalMs: rawInterval };
+  }
+
   return {
     extraSessionDirs: file.extraSessionDirs ?? [],
     extraArchiveDirs: file.extraArchiveDirs ?? [],
+    sync: syncCfg,
     embedder: file.embedder,
   };
 }
