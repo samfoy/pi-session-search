@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
+import { loadConfig, saveConfig, getConfigPath, getIndexDir, DEFAULT_SYNC_INTERVAL_MS } from "./config";
 import type { Config, ConfigFile, SyncConfig } from "./config";
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
@@ -42,8 +42,7 @@ export default function (pi: ExtensionAPI) {
     return handle;
   }
 
-  // resolved from config at session_start; -1 means auto-sync disabled
-  const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+  // Resolved from config at session_start; -1 means auto-sync disabled.
   let effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
 
   // ------------------------------------------------------------------
@@ -105,7 +104,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
     }
 
-      // Apply configurable sync interval (from nested sync.intervalMs)
+    // Apply configurable sync interval (from nested sync.intervalMs)
     effectiveSyncIntervalMs = currentConfig?.sync?.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
     // FTS5 works out of the box with no config; embeddings are optional.
@@ -169,7 +168,18 @@ export default function (pi: ExtensionAPI) {
         });
 
       // Periodic background sync to pick up new/changed sessions
-      // (skipped when effectiveSyncIntervalMs is -1, i.e. auto-sync disabled)
+      if (effectiveSyncIntervalMs === -1) {
+        // Auto-sync explicitly disabled by user.
+        ctx.ui.notify("session-search: auto-sync disabled (set sync.intervalMs > 0 to re-enable)", "info");
+      } else if (effectiveSyncIntervalMs <= 0) {
+        // Invalid non-positive value (other than -1): fall back to default with warning.
+        ctx.ui.notify(
+          `session-search: invalid sync.intervalMs (${effectiveSyncIntervalMs}), falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
+          "warning",
+        );
+        effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
+      }
+
       if (effectiveSyncIntervalMs > 0) {
         syncTimer = setInterval(async () => {
           if (!sessionIndex || shuttingDown) return;

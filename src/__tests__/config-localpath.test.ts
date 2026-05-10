@@ -22,6 +22,7 @@ import {
   getIndexDir,
   loadConfig,
   saveConfig,
+  DEFAULT_SYNC_INTERVAL_MS,
 } from "../config";
 
 const originalHome = process.env.HOME;
@@ -319,5 +320,19 @@ describe("config.localPath resolution", () => {
     assert.ok(cfg);
     assert.equal(cfg.sync, undefined);
     // nullish coalesce to DEFAULT would yield 300000 — same as before
+  });
+
+  it("loadConfig: 0 interval passed through (index.ts treats 0 as invalid → fallback)", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { intervalMs: 0 } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.intervalMs, 0);
+    // index.ts decides timer behaviour:
+    //   -1 → disabled, >0 → timer, <=0 (other than -1) → warning + default
+  });
+
+  it("DEFAULT_SYNC_INTERVAL_MS is exported from config module", () => {
+    assert.equal(DEFAULT_SYNC_INTERVAL_MS, 5 * 60 * 1000);
   });
 });

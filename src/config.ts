@@ -4,13 +4,19 @@ import type { EmbedderConfig } from "./embedder";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
-const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+/** Default interval (ms) between automatic session index re-syncs. */
+export const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 /** Sync behaviour configuration. Mirrors EmbedderConfig nesting pattern. */
 export interface SyncConfig {
   /**
    * Interval (ms) between automatic session index re-syncs.
-   * Default: 300000 (5 min). Use -1 to disable background auto-sync entirely.
+   *
+   * - Positive value: sync fires every N milliseconds.
+   * - `-1`: disables periodic auto-sync entirely (initial startup sync still runs).
+   * - Any other non-positive value falls back to the default (5 min) with a warning.
+   *
+   * @default 300000 (5 minutes when sync node is absent)
    */
   intervalMs: number;
 }
@@ -31,7 +37,7 @@ export interface ConfigFile {
   extraArchiveDirs?: string[];
   /** Nested sync settings. */
   sync?: {
-    /** Interval in ms; -1 disables auto-sync. */
+    /** Interval in ms; -1 disables auto-sync; other non-positive values fall back to default. */
     intervalMs?: number;
   };
   embedder?: EmbedderConfig;
