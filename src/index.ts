@@ -6,6 +6,7 @@ import {
   getConfigPath,
   getIndexDir,
   DEFAULT_SYNC_INTERVAL_MS,
+  DEFAULT_INITIAL_DELAY_MS,
 } from "./config";
 import type { Config, ConfigFile, SyncConfig } from "./config";
 
@@ -26,6 +27,25 @@ export function resolveSyncAction(rawInterval?: number): {
     return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS, fallback: true };
   }
   return { disabled: false, intervalMs: rawInterval };
+}
+
+/**
+ * Resolve the initial startup sync delay and return the action.
+ *
+ * - `-1` → `{ skip: true }` (no initial sync)
+ * - `>= 0` → `{ skip: false, delayMs: <value> }` (sync after N ms, 0 = immediate)
+ * - other < 0 → `{ skip: false, delayMs: DEFAULT, fallback: true }` (warn + default)
+ */
+export function resolveInitialSyncAction(rawDelay?: number): {
+  skip: boolean;
+  delayMs?: number;
+  fallback?: boolean;
+} {
+  if (rawDelay === -1) return { skip: true };
+  if (typeof rawDelay !== "number" || rawDelay < 0) {
+    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS, fallback: true };
+  }
+  return { skip: false, delayMs: rawDelay };
 }
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
@@ -133,14 +153,18 @@ export default function (pi: ExtensionAPI) {
     const syncAction = resolveSyncAction(currentConfig?.sync?.intervalMs);
     effectiveSyncIntervalMs = syncAction.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
+    // Apply configurable initial sync delay (from nested sync.initialDelayMs)
+    const initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelayMs);
+
     // FTS5 works out of the box with no config; embeddings are optional.
-    void startIndex(currentConfig, ctx, syncAction);
+    void startIndex(currentConfig, ctx, syncAction, initialAction);
   });
 
   async function startIndex(
     config: Config | null,
     ctx: any,
     syncAction?: ReturnType<typeof resolveSyncAction>,
+    initialAction?: ReturnType<typeof resolveInitialSyncAction>,
   ) {
     try {
       if (config?.embedder) {
@@ -158,18 +182,34 @@ export default function (pi: ExtensionAPI) {
           config?.extraArchiveDirs ?? [],
         );
       }
-      await sessionIndex.load();
+// Resolve initial sync action (skip/delay/immediate)
+      const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
+      if (initAction.skip) {
+        ctx.ui.notify(
+          "session-search: initial sync skipped (set sync.initialDelayMs >= 0 to enable)",
+          "info",
+        );
+      } else if (initAction.fallback) {
+        ctx.ui.notify(
+          "session-search: invalid sync.initialDelayMs, falling back to immediate",
+          "warning",
+        );
+      }
 
       // Fire-and-forget: run initial sync in the background so startIndex
       // returns immediately and doesn't block pi's startup.
-      const SYNC_TIMEOUT_MS = 600_000;
-      Promise.race([
-        sessionIndex.sync(
-          (msg) => ctx.ui.setStatus("session-search", msg)
-        ),
-        new Promise<null>((resolve) => scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS)),
-      ])
-        .then((syncResult) => {
+      if (!initAction.skip) {
+        const SYNC_TIMEOUT_MS = 600_000;
+        const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
+        const runSync = () =>
+          Promise.race([
+            sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
+            new Promise<null>((resolve) =>
+              scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS),
+            ),
+          ]);
+
+        const handleSyncResult = (syncResult: Awaited<ReturnType<typeof runSync>>) => {
           if (shuttingDown) return;
           if (syncResult === null) {
             ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
@@ -185,17 +225,33 @@ export default function (pi: ExtensionAPI) {
               if (moved) parts.push(`↗${moved} moved`);
               ctx.ui.setStatus(
                 "session-search",
-                `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`
+                `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`,
               );
               scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
             }
           }
-        })
-        .catch((err) => {
-          if (shuttingDown) return;
-          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-          ctx.ui.setStatus("session-search", "");
-        });
+        };
+
+        if (delayMs > 0) {
+          scheduleTimer(async () => {
+            try {
+              handleSyncResult(await runSync());
+            } catch (err: any) {
+              if (shuttingDown) return;
+              ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+              ctx.ui.setStatus("session-search", "");
+            }
+          }, delayMs);
+        } else {
+          runSync()
+            .then(handleSyncResult)
+            .catch((err: any) => {
+              if (shuttingDown) return;
+              ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+              ctx.ui.setStatus("session-search", "");
+            });
+        }
+      }
 
       // Periodic background sync to pick up new/changed sessions
       const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);

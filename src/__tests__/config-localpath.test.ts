@@ -23,6 +23,7 @@ import {
   loadConfig,
   saveConfig,
   DEFAULT_SYNC_INTERVAL_MS,
+  DEFAULT_INITIAL_DELAY_MS,
 } from "../config";
 
 const originalHome = process.env.HOME;
@@ -334,5 +335,44 @@ describe("config.localPath resolution", () => {
 
   it("DEFAULT_SYNC_INTERVAL_MS is exported from config module", () => {
     assert.equal(DEFAULT_SYNC_INTERVAL_MS, 5 * 60 * 1000);
+  });
+
+  it("DEFAULT_INITIAL_DELAY_MS is exported and defaults to 0", () => {
+    assert.equal(DEFAULT_INITIAL_DELAY_MS, 0);
+  });
+
+  it("loadConfig: reads initialDelayMs from nested sync node", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { initialDelayMs: 30_000 } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.initialDelayMs, 30_000);
+  });
+
+  it("loadConfig: -1 initialDelayMs preserved for skipping initial sync", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { initialDelayMs: -1 } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.initialDelayMs, -1);
+  });
+
+  it("loadConfig: both intervalMs and initialDelayMs loaded together", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { intervalMs: 600_000, initialDelayMs: 10_000 } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.intervalMs, 600_000);
+    assert.equal(cfg.sync?.initialDelayMs, 10_000);
+  });
+
+  it("loadConfig: initialDelayMs alone (no intervalMs) still produces sync node", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { initialDelayMs: 5_000 } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.ok(cfg.sync);
+    assert.equal(cfg.sync!.initialDelayMs, 5_000);
+    assert.equal(cfg.sync!.intervalMs, undefined);
   });
 });

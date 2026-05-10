@@ -7,6 +7,9 @@ import type { EmbedderConfig } from "./embedder";
 /** Default interval (ms) between automatic session index re-syncs. */
 export const DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Default delay (ms) before the initial startup sync fires (0 = immediate). */
+export const DEFAULT_INITIAL_DELAY_MS = 0;
+
 /** Sync behaviour configuration. Mirrors EmbedderConfig nesting pattern. */
 export interface SyncConfig {
   /**
@@ -18,7 +21,18 @@ export interface SyncConfig {
    *
    * @default 300000 (5 minutes when sync node is absent)
    */
-  intervalMs: number;
+  intervalMs?: number;
+  /**
+   * Delay (ms) before the initial startup sync fires after loading the index.
+   *
+   * - Positive value: wait N milliseconds before running the first sync.
+   * - `0`: run immediately (default).
+   * - `-1`: skip the initial startup sync entirely.
+   * - Any other non-positive value falls back to the default (immediate) with a warning.
+   *
+   * @default 0 (immediate)
+   */
+  initialDelayMs?: number;
 }
 
 export interface Config {
@@ -39,6 +53,8 @@ export interface ConfigFile {
   sync?: {
     /** Interval in ms; -1 disables auto-sync; other non-positive values fall back to default. */
     intervalMs?: number;
+    /** Delay in ms before initial sync; 0 = immediate, -1 = skip entirely. */
+    initialDelayMs?: number;
   };
   embedder?: EmbedderConfig;
 }
@@ -122,10 +138,12 @@ export function loadConfig(cwd?: string): Config | null {
   }
 
   const rawInterval = file.sync?.intervalMs;
+  const rawInitialDelay = file.sync?.initialDelayMs;
   let syncCfg: SyncConfig | undefined;
-  if (typeof rawInterval === "number") {
-    syncCfg = { intervalMs: rawInterval };
-  }
+  const syncFields: SyncConfig = {};
+  if (typeof rawInterval === "number") syncFields.intervalMs = rawInterval;
+  if (typeof rawInitialDelay === "number") syncFields.initialDelayMs = rawInitialDelay;
+  if (Object.keys(syncFields).length > 0) syncCfg = syncFields;
 
   return {
     extraSessionDirs: file.extraSessionDirs ?? [],
