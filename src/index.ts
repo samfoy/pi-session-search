@@ -8,11 +8,20 @@ import {
   DEFAULT_SYNC_INTERVAL_MS,
   DEFAULT_INITIAL_DELAY_MS,
 } from "./config";
-import type { Config, ConfigFile, SyncConfig } from "./config";
+import type { Config } from "./config";
+import { createEmbedder } from "./embedder";
+import { SessionIndex } from "./session-index";
+import { FtsSessionIndex } from "./fts-index";
+import { readSessionConversation } from "./reader";
+import { resolve } from "node:path";
+import { truncate, pathToSlug, formatRelativeDate } from "./utils";
+
+type AnyIndex = SessionIndex | FtsSessionIndex;
 
 /**
  * Resolve the effective sync interval and return the timer action.
  *
+ * - `undefined` → silent default (no warning)
  * - `-1` → `{ disabled: true }` (no timer)
  * - `> 0` → `{ disabled: false, intervalMs: <value> }` (timer fires every N ms)
  * - other ≤ 0 → `{ disabled: false, intervalMs: DEFAULT, fallback: true }` (warn + default)
@@ -22,8 +31,10 @@ export function resolveSyncAction(rawInterval?: number): {
   intervalMs?: number;
   fallback?: boolean;
 } {
+  if (rawInterval === undefined)
+    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS };
   if (rawInterval === -1) return { disabled: true };
-  if (typeof rawInterval !== "number" || rawInterval <= 0) {
+  if (rawInterval <= 0) {
     return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS, fallback: true };
   }
   return { disabled: false, intervalMs: rawInterval };
@@ -32,6 +43,7 @@ export function resolveSyncAction(rawInterval?: number): {
 /**
  * Resolve the initial startup sync delay and return the action.
  *
+ * - `undefined` → silent default immediate (no warning)
  * - `-1` → `{ skip: true }` (no initial sync)
  * - `>= 0` → `{ skip: false, delayMs: <value> }` (sync after N ms, 0 = immediate)
  * - other < 0 → `{ skip: false, delayMs: DEFAULT, fallback: true }` (warn + default)
@@ -41,8 +53,10 @@ export function resolveInitialSyncAction(rawDelay?: number): {
   delayMs?: number;
   fallback?: boolean;
 } {
+  if (rawDelay === undefined)
+    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS };
   if (rawDelay === -1) return { skip: true };
-  if (typeof rawDelay !== "number" || rawDelay < 0) {
+  if (rawDelay < 0) {
     return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS, fallback: true };
   }
   return { skip: false, delayMs: rawDelay };
@@ -62,14 +76,6 @@ export function isChildProcess(): boolean {
   if (!process.stdin.isTTY) return true;
   return false;
 }
-import { createEmbedder } from "./embedder";
-import { SessionIndex } from "./session-index";
-import { FtsSessionIndex } from "./fts-index";
-import { readSessionConversation } from "./reader";
-import { resolve } from "node:path";
-import { truncate, pathToSlug, formatRelativeDate } from "./utils";
-
-type AnyIndex = SessionIndex | FtsSessionIndex;
 
 export default function (pi: ExtensionAPI) {
   let sessionIndex: AnyIndex | null = null;
@@ -204,6 +210,9 @@ export default function (pi: ExtensionAPI) {
           config?.extraArchiveDirs ?? [],
         );
       }
+
+      // Load persisted index from disk (searches work immediately; runs v2→v3 migration)
+      await sessionIndex.load();
 
       // Resolve initial sync action (skip/delay/immediate)
       const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);

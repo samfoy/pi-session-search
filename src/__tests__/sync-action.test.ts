@@ -39,11 +39,11 @@ describe("resolveSyncAction", () => {
     assert.equal(result.fallback, true);
   });
 
-  it("falls back to default when undefined (no config)", () => {
+  it("returns silent default when undefined (no config) — no fallback warning", () => {
     const result = resolveSyncAction(undefined);
     assert.equal(result.disabled, false);
     assert.ok(result.intervalMs && result.intervalMs > 0);
-    assert.equal(result.fallback, true);
+    assert.equal(result.fallback, undefined); // absent config must not warn
   });
 });
 
@@ -76,11 +76,11 @@ describe("resolveInitialSyncAction", () => {
     assert.equal(result.fallback, true);
   });
 
-  it("falls back to default when undefined (no config)", () => {
+  it("returns silent default when undefined (no config) — no fallback warning", () => {
     const result = resolveInitialSyncAction(undefined);
     assert.equal(result.skip, false);
     assert.equal(result.delayMs, 0);
-    assert.equal(result.fallback, true);
+    assert.equal(result.fallback, undefined); // absent config must not warn
   });
 });
 
