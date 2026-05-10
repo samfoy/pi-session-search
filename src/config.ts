@@ -33,6 +33,21 @@ export interface SyncConfig {
    * @default 0 (immediate)
    */
   initialDelay?: number;
+  /**
+   * When true, automatically disable all sync (both initial and periodic)
+   * if this pi process is detected as a subagent child or non-interactive
+   * programmatic invocation.
+   *
+   * Detection signals (any one triggers):
+   * - `PI_SUBAGENT_DEPTH > 0` (official pi-subagents child marker)
+   * - `!process.stdin.isTTY` (non-interactive terminal)
+   *
+   * Useful for suppressing background sync in CI/CD pipelines, automated
+   * tooling, or nested agent workflows where sync would waste resources.
+   *
+   * @default false
+   */
+  disableForChild?: boolean;
 }
 
 export interface Config {
@@ -55,6 +70,8 @@ export interface ConfigFile {
     interval?: number;
     /** Delay in ms before initial sync; 0 = immediate, -1 = skip entirely. */
     initialDelay?: number;
+    /** Auto-disable sync when running as a subagent child or non-interactively. */
+    disableForChild?: boolean;
   };
   embedder?: EmbedderConfig;
 }
@@ -139,10 +156,12 @@ export function loadConfig(cwd?: string): Config | null {
 
   const rawInterval = file.sync?.interval;
   const rawInitialDelay = file.sync?.initialDelay;
+  const rawDisableForChild = file.sync?.disableForChild;
   let syncCfg: SyncConfig | undefined;
   const syncFields: SyncConfig = {};
   if (typeof rawInterval === "number") syncFields.interval = rawInterval;
   if (typeof rawInitialDelay === "number") syncFields.initialDelay = rawInitialDelay;
+  if (typeof rawDisableForChild === "boolean") syncFields.disableForChild = rawDisableForChild;
   if (Object.keys(syncFields).length > 0) syncCfg = syncFields;
 
   return {

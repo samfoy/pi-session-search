@@ -6,9 +6,9 @@
  * setInterval isn't scheduled when intervalMs === -1 without needing
  * a full pi runtime mock.
  */
-import { describe, it } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { resolveSyncAction, resolveInitialSyncAction } from "../index";
+import { resolveSyncAction, resolveInitialSyncAction, isChildProcess } from "../index";
 
 describe("resolveSyncAction", () => {
   it("returns disabled for -1", () => {
@@ -81,5 +81,69 @@ describe("resolveInitialSyncAction", () => {
     assert.equal(result.skip, false);
     assert.equal(result.delayMs, 0);
     assert.equal(result.fallback, true);
+  });
+});
+
+describe("isChildProcess", () => {
+  const origDepth = process.env.PI_SUBAGENT_DEPTH;
+  const origStdinIsTty = process.stdin.isTTY;
+
+  afterEach(() => {
+    // Restore environment.
+    if (origDepth === undefined) {
+      delete process.env.PI_SUBAGENT_DEPTH;
+    } else {
+      process.env.PI_SUBAGENT_DEPTH = origDepth;
+    }
+    // Restore stdin.isTTY via Object.defineProperty (it's a getter).
+    Object.defineProperty(process.stdin, "isTTY", {
+      value: origStdinIsTty,
+      writable: false,
+      enumerable: true,
+      configurable: true,
+    });
+  });
+
+  it("returns true when PI_SUBAGENT_DEPTH > 0", () => {
+    process.env.PI_SUBAGENT_DEPTH = "1";
+    assert.equal(isChildProcess(), true);
+  });
+
+  it("returns true when PI_SUBAGENT_DEPTH is deeply nested", () => {
+    process.env.PI_SUBAGENT_DEPTH = "3";
+    assert.equal(isChildProcess(), true);
+  });
+
+  it("returns false when PI_SUBAGENT_DEPTH is 0 and stdin is TTY", () => {
+    process.env.PI_SUBAGENT_DEPTH = "0";
+    Object.defineProperty(process.stdin, "isTTY", {
+      value: true,
+      writable: false,
+      enumerable: true,
+      configurable: true,
+    });
+    assert.equal(isChildProcess(), false);
+  });
+
+  it("returns true when stdin.isTTY is false (non-interactive)", () => {
+    delete process.env.PI_SUBAGENT_DEPTH;
+    Object.defineProperty(process.stdin, "isTTY", {
+      value: false,
+      writable: false,
+      enumerable: true,
+      configurable: true,
+    });
+    assert.equal(isChildProcess(), true);
+  });
+
+  it("returns false when both signals are absent (normal interactive session)", () => {
+    delete process.env.PI_SUBAGENT_DEPTH;
+    Object.defineProperty(process.stdin, "isTTY", {
+      value: true,
+      writable: false,
+      enumerable: true,
+      configurable: true,
+    });
+    assert.equal(isChildProcess(), false);
   });
 });

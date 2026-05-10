@@ -375,4 +375,39 @@ describe("config.localPath resolution", () => {
     assert.equal(cfg.sync!.initialDelay, 5_000);
     assert.equal(cfg.sync!.interval, undefined);
   });
+
+  it("loadConfig: disableForChild=true is passed through", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { disableForChild: true } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.disableForChild, true);
+  });
+
+  it("loadConfig: disableForChild=false is passed through", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { disableForChild: false } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.disableForChild, false);
+  });
+
+  it("loadConfig: disableForChild ignored when non-boolean", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    const configFile = getConfigPath(tmpProject);
+    fs.writeFileSync(configFile, JSON.stringify({ sync: { disableForChild: "yes" } }), "utf-8");
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.disableForChild, undefined);
+  });
+
+  it("loadConfig: all three sync fields loaded together", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { interval: -1, initialDelay: -1, disableForChild: true } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.interval, -1);
+    assert.equal(cfg.sync?.initialDelay, -1);
+    assert.equal(cfg.sync?.disableForChild, true);
+  });
 });

@@ -47,6 +47,21 @@ export function resolveInitialSyncAction(rawDelay?: number): {
   }
   return { skip: false, delayMs: rawDelay };
 }
+
+/**
+ * Detect whether this pi process is a child subagent or non-interactive
+ * programmatic invocation.
+ *
+ * Signals checked (any one triggers):
+ * - `PI_SUBAGENT_DEPTH > 0` — official pi-subagents child marker
+ * - `!process.stdin.isTTY` — non-interactive terminal (CI/CD, pipes, SDK embedders)
+ */
+export function isChildProcess(): boolean {
+  const depth = Number(process.env.PI_SUBAGENT_DEPTH);
+  if (depth > 0) return true;
+  if (!process.stdin.isTTY) return true;
+  return false;
+}
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
 import { FtsSessionIndex } from "./fts-index";
@@ -150,11 +165,18 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Apply configurable sync interval (from nested sync.interval)
-    const syncAction = resolveSyncAction(currentConfig?.sync?.interval);
+    let syncAction = resolveSyncAction(currentConfig?.sync?.interval);
     effectiveSyncIntervalMs = syncAction.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
     // Apply configurable initial sync delay (from nested sync.initialDelay)
-    const initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelay);
+    let initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelay);
+
+    // Auto-disable for child processes if configured
+    if (currentConfig?.sync?.disableForChild && isChildProcess()) {
+      syncAction = { disabled: true };
+      initialAction = { skip: true };
+      ctx.ui.notify("session-search: sync auto-disabled (child process detected)", "info");
+    }
 
     // FTS5 works out of the box with no config; embeddings are optional.
     void startIndex(currentConfig, ctx, syncAction, initialAction);
