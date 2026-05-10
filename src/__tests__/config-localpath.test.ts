@@ -410,4 +410,25 @@ describe("config.localPath resolution", () => {
     assert.equal(cfg.sync?.initialDelay, -1);
     assert.equal(cfg.sync?.disableForChild, true);
   });
+
+  it("loadConfig: disableForChild alone (no other sync fields) still produces sync node", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { disableForChild: true } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.ok(cfg.sync);
+    assert.equal(cfg.sync!.disableForChild, true);
+    assert.equal(cfg.sync!.interval, undefined);
+    assert.equal(cfg.sync!.initialDelay, undefined);
+  });
+
+  it("loadConfig: disableForChild + interval without initialDelay", () => {
+    writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
+    saveConfig({ sync: { interval: 900_000, disableForChild: true } }, tmpProject);
+    const cfg = loadConfig(tmpProject);
+    assert.ok(cfg);
+    assert.equal(cfg.sync?.interval, 900_000);
+    assert.equal(cfg.sync?.disableForChild, true);
+    assert.equal(cfg.sync?.initialDelay, undefined);
+  });
 });

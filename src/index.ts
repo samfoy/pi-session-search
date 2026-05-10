@@ -204,7 +204,8 @@ export default function (pi: ExtensionAPI) {
           config?.extraArchiveDirs ?? [],
         );
       }
-// Resolve initial sync action (skip/delay/immediate)
+
+      // Resolve initial sync action (skip/delay/immediate)
       const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
       if (initAction.skip) {
         ctx.ui.notify(
