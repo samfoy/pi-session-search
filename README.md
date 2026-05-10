@@ -50,6 +50,34 @@ To enable hybrid search (keyword + semantic), run `/session-embeddings-setup` in
 
 Config is stored at `~/.pi/session-search/config.json`. The `embedder` field is optional — omit it for FTS5-only mode.
 
+### Sync configuration
+
+By default, the session index re-syncs automatically every 5 minutes after startup.
+Fine-tune or disable this behaviour via the `sync` field:
+
+```json
+{
+  "sync": {
+    "interval": 900000,
+    "initialDelay": 2000,
+    "disableForChild": true
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `interval` | number | `300000` (5 min) | Milliseconds between periodic re-syncs. Set to `-1` to disable periodic sync entirely (initial startup sync still runs). Any other non-positive value falls back to 5 min with a warning. |
+| `initialDelay` | number | `0` (immediate) | Milliseconds to wait before the first startup sync. Set to `-1` to skip the initial sync entirely. Set to a positive value to defer startup sync (e.g., `2000` to let pi finish booting first). |
+| `disableForChild` | boolean | `false` | When `true`, automatically disables both initial and periodic sync if the pi process is detected as a subagent child (`PI_SUBAGENT_DEPTH > 0`) or running non-interactively (`!process.stdin.isTTY`). Useful for CI/CD pipelines and nested agent workflows. |
+
+**Common configurations:**
+
+- **Disable all sync**: `{ "sync": { "interval": -1, "initialDelay": -1 } }`
+- **Slower sync cadence**: `{ "sync": { "interval": 900000 } }` (every 15 min)
+- **Defer startup sync**: `{ "sync": { "initialDelay": 3000 } }` (wait 3 seconds)
+- **Auto-disable in children**: `{ "sync": { "disableForChild": true } }`
+
 ### OpenAI-compatible providers
 
 Many embedding providers expose an OpenAI-compatible `/v1/embeddings` endpoint. Use `"type": "openai-compatible"` with a `baseUrl`:
@@ -123,7 +151,7 @@ Tested against a 2,159-session corpus: hybrid surfaces **75% more relevant docum
 ### Indexing
 
 - Index stored at `~/.pi/session-search/index/`
-- Incremental sync on startup + every 5 minutes
+- Incremental sync on startup + configurable periodic re-sync (default 5 min)
 - Two separate SQLite DBs: `sessions-fts.db` (pure-FTS mode) and `hybrid-fts.db` (side-car for embedder mode)
 - Switching modes doesn't corrupt state
 
