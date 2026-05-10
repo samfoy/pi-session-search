@@ -1,7 +1,32 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { loadConfig, saveConfig, getConfigPath, getIndexDir, DEFAULT_SYNC_INTERVAL_MS } from "./config";
+import {
+  loadConfig,
+  saveConfig,
+  getConfigPath,
+  getIndexDir,
+  DEFAULT_SYNC_INTERVAL_MS,
+} from "./config";
 import type { Config, ConfigFile, SyncConfig } from "./config";
+
+/**
+ * Resolve the effective sync interval and return the timer action.
+ *
+ * - `-1` → `{ disabled: true }` (no timer)
+ * - `> 0` → `{ disabled: false, intervalMs: <value> }` (timer fires every N ms)
+ * - other ≤ 0 → `{ disabled: false, intervalMs: DEFAULT, fallback: true }` (warn + default)
+ */
+export function resolveSyncAction(rawInterval?: number): {
+  disabled: boolean;
+  intervalMs?: number;
+  fallback?: boolean;
+} {
+  if (rawInterval === -1) return { disabled: true };
+  if (typeof rawInterval !== "number" || rawInterval <= 0) {
+    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS, fallback: true };
+  }
+  return { disabled: false, intervalMs: rawInterval };
+}
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
 import { FtsSessionIndex } from "./fts-index";
@@ -105,13 +130,18 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Apply configurable sync interval (from nested sync.intervalMs)
-    effectiveSyncIntervalMs = currentConfig?.sync?.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
+    const syncAction = resolveSyncAction(currentConfig?.sync?.intervalMs);
+    effectiveSyncIntervalMs = syncAction.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
     // FTS5 works out of the box with no config; embeddings are optional.
-    void startIndex(currentConfig, ctx);
+    void startIndex(currentConfig, ctx, syncAction);
   });
 
-  async function startIndex(config: Config | null, ctx: any) {
+  async function startIndex(
+    config: Config | null,
+    ctx: any,
+    syncAction?: ReturnType<typeof resolveSyncAction>,
+  ) {
     try {
       if (config?.embedder) {
         const embedder = createEmbedder(config.embedder);
@@ -168,19 +198,18 @@ export default function (pi: ExtensionAPI) {
         });
 
       // Periodic background sync to pick up new/changed sessions
-      if (effectiveSyncIntervalMs === -1) {
-        // Auto-sync explicitly disabled by user.
+      const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);
+      if (action.disabled) {
         ctx.ui.notify("session-search: auto-sync disabled (set sync.intervalMs > 0 to re-enable)", "info");
-      } else if (effectiveSyncIntervalMs <= 0) {
-        // Invalid non-positive value (other than -1): fall back to default with warning.
+      } else if (action.fallback) {
         ctx.ui.notify(
-          `session-search: invalid sync.intervalMs (${effectiveSyncIntervalMs}), falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
+          `session-search: invalid sync.intervalMs, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
           "warning",
         );
         effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
       }
 
-      if (effectiveSyncIntervalMs > 0) {
+      if (!action.disabled && effectiveSyncIntervalMs > 0) {
         syncTimer = setInterval(async () => {
           if (!sessionIndex || shuttingDown) return;
           try {
