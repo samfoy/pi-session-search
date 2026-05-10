@@ -149,12 +149,12 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
     }
 
-    // Apply configurable sync interval (from nested sync.intervalMs)
-    const syncAction = resolveSyncAction(currentConfig?.sync?.intervalMs);
+    // Apply configurable sync interval (from nested sync.interval)
+    const syncAction = resolveSyncAction(currentConfig?.sync?.interval);
     effectiveSyncIntervalMs = syncAction.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
 
-    // Apply configurable initial sync delay (from nested sync.initialDelayMs)
-    const initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelayMs);
+    // Apply configurable initial sync delay (from nested sync.initialDelay)
+    const initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelay);
 
     // FTS5 works out of the box with no config; embeddings are optional.
     void startIndex(currentConfig, ctx, syncAction, initialAction);
@@ -186,12 +186,12 @@ export default function (pi: ExtensionAPI) {
       const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
       if (initAction.skip) {
         ctx.ui.notify(
-          "session-search: initial sync skipped (set sync.initialDelayMs >= 0 to enable)",
+          "session-search: initial sync skipped (set sync.initialDelay >= 0 to enable)",
           "info",
         );
       } else if (initAction.fallback) {
         ctx.ui.notify(
-          "session-search: invalid sync.initialDelayMs, falling back to immediate",
+          "session-search: invalid sync.initialDelay, falling back to immediate",
           "warning",
         );
       }
@@ -256,10 +256,10 @@ export default function (pi: ExtensionAPI) {
       // Periodic background sync to pick up new/changed sessions
       const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);
       if (action.disabled) {
-        ctx.ui.notify("session-search: auto-sync disabled (set sync.intervalMs > 0 to re-enable)", "info");
+        ctx.ui.notify("session-search: auto-sync disabled (set sync.interval > 0 to re-enable)", "info");
       } else if (action.fallback) {
         ctx.ui.notify(
-          `session-search: invalid sync.intervalMs, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
+          `session-search: invalid sync.interval, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
           "warning",
         );
         effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;

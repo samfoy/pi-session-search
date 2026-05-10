@@ -21,7 +21,7 @@ export interface SyncConfig {
    *
    * @default 300000 (5 minutes when sync node is absent)
    */
-  intervalMs?: number;
+  interval?: number;
   /**
    * Delay (ms) before the initial startup sync fires after loading the index.
    *
@@ -32,7 +32,7 @@ export interface SyncConfig {
    *
    * @default 0 (immediate)
    */
-  initialDelayMs?: number;
+  initialDelay?: number;
 }
 
 export interface Config {
@@ -52,9 +52,9 @@ export interface ConfigFile {
   /** Nested sync settings. */
   sync?: {
     /** Interval in ms; -1 disables auto-sync; other non-positive values fall back to default. */
-    intervalMs?: number;
+    interval?: number;
     /** Delay in ms before initial sync; 0 = immediate, -1 = skip entirely. */
-    initialDelayMs?: number;
+    initialDelay?: number;
   };
   embedder?: EmbedderConfig;
 }
@@ -137,12 +137,12 @@ export function loadConfig(cwd?: string): Config | null {
     return null;
   }
 
-  const rawInterval = file.sync?.intervalMs;
-  const rawInitialDelay = file.sync?.initialDelayMs;
+  const rawInterval = file.sync?.interval;
+  const rawInitialDelay = file.sync?.initialDelay;
   let syncCfg: SyncConfig | undefined;
   const syncFields: SyncConfig = {};
-  if (typeof rawInterval === "number") syncFields.intervalMs = rawInterval;
-  if (typeof rawInitialDelay === "number") syncFields.initialDelayMs = rawInitialDelay;
+  if (typeof rawInterval === "number") syncFields.interval = rawInterval;
+  if (typeof rawInitialDelay === "number") syncFields.initialDelay = rawInitialDelay;
   if (Object.keys(syncFields).length > 0) syncCfg = syncFields;
 
   return {

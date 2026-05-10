@@ -298,25 +298,25 @@ describe("config.localPath resolution", () => {
 
   it("loadConfig: reads custom interval from nested sync node", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { intervalMs: 10 * 60 * 1000 } }, tmpProject);
+    saveConfig({ sync: { interval: 10 * 60 * 1000 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
-    assert.equal(cfg.sync?.intervalMs, 10 * 60 * 1000);
+    assert.equal(cfg.sync?.interval, 10 * 60 * 1000);
   });
 
   it("loadConfig: -1 interval preserved for disabling auto-sync", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { intervalMs: -1 } }, tmpProject);
+    saveConfig({ sync: { interval: -1 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
-    assert.equal(cfg.sync?.intervalMs, -1);
+    assert.equal(cfg.sync?.interval, -1);
   });
 
-  it("loadConfig: ignores invalid sync.intervalMs and omits sync node", () => {
+  it("loadConfig: ignores invalid sync.interval and omits sync node", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
     // Write raw JSON with a string value (not a number)
     const configFile = getConfigPath(tmpProject);
-    fs.writeFileSync(configFile, JSON.stringify({ sync: { intervalMs: "fast" } }), "utf-8");
+    fs.writeFileSync(configFile, JSON.stringify({ sync: { interval: "fast" } }), "utf-8");
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
     assert.equal(cfg.sync, undefined);
@@ -325,10 +325,10 @@ describe("config.localPath resolution", () => {
 
   it("loadConfig: 0 interval passed through (index.ts treats 0 as invalid → fallback)", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { intervalMs: 0 } }, tmpProject);
+    saveConfig({ sync: { interval: 0 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
-    assert.equal(cfg.sync?.intervalMs, 0);
+    assert.equal(cfg.sync?.interval, 0);
     // index.ts decides timer behaviour:
     //   -1 → disabled, >0 → timer, <=0 (other than -1) → warning + default
   });
@@ -341,38 +341,38 @@ describe("config.localPath resolution", () => {
     assert.equal(DEFAULT_INITIAL_DELAY_MS, 0);
   });
 
-  it("loadConfig: reads initialDelayMs from nested sync node", () => {
+  it("loadConfig: reads initialDelay from nested sync node", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { initialDelayMs: 30_000 } }, tmpProject);
+    saveConfig({ sync: { initialDelay: 30_000 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
-    assert.equal(cfg.sync?.initialDelayMs, 30_000);
+    assert.equal(cfg.sync?.initialDelay, 30_000);
   });
 
-  it("loadConfig: -1 initialDelayMs preserved for skipping initial sync", () => {
+  it("loadConfig: -1 initialDelay preserved for skipping initial sync", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { initialDelayMs: -1 } }, tmpProject);
+    saveConfig({ sync: { initialDelay: -1 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
-    assert.equal(cfg.sync?.initialDelayMs, -1);
+    assert.equal(cfg.sync?.initialDelay, -1);
   });
 
-  it("loadConfig: both intervalMs and initialDelayMs loaded together", () => {
+  it("loadConfig: both interval and initialDelay loaded together", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { intervalMs: 600_000, initialDelayMs: 10_000 } }, tmpProject);
+    saveConfig({ sync: { interval: 600_000, initialDelay: 10_000 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
-    assert.equal(cfg.sync?.intervalMs, 600_000);
-    assert.equal(cfg.sync?.initialDelayMs, 10_000);
+    assert.equal(cfg.sync?.interval, 600_000);
+    assert.equal(cfg.sync?.initialDelay, 10_000);
   });
 
-  it("loadConfig: initialDelayMs alone (no intervalMs) still produces sync node", () => {
+  it("loadConfig: initialDelay alone (no interval) still produces sync node", () => {
     writeProjectSettings({ "pi-session-search": { localPath: tmpLocal } });
-    saveConfig({ sync: { initialDelayMs: 5_000 } }, tmpProject);
+    saveConfig({ sync: { initialDelay: 5_000 } }, tmpProject);
     const cfg = loadConfig(tmpProject);
     assert.ok(cfg);
     assert.ok(cfg.sync);
-    assert.equal(cfg.sync!.initialDelayMs, 5_000);
-    assert.equal(cfg.sync!.intervalMs, undefined);
+    assert.equal(cfg.sync!.initialDelay, 5_000);
+    assert.equal(cfg.sync!.interval, undefined);
   });
 });
