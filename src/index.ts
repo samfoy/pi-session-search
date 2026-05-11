@@ -155,7 +155,15 @@ export default function (pi: ExtensionAPI) {
       // Keep it under 500 chars if possible
       const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
 
-      return { systemPrompt: (event.systemPrompt || "") + trimmed };
+      return {
+        message: {
+          customType: "pi-session-search-primer",
+          // Strip the leading blank lines — those only made sense when we were
+          // appending to a system prompt. As a standalone message they're noise.
+          content: trimmed.replace(/^\n+/, ""),
+          display: false,
+        },
+      };
     } catch {
       // Don't block on primer failure
       return undefined;
