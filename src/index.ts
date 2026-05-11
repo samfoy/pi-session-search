@@ -1,6 +1,13 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { loadConfig, saveConfig, getConfigPath, getIndexDir } from "./config";
+import {
+  loadConfig,
+  saveConfig,
+  getConfigPath,
+  getIndexDir,
+  DEFAULT_SYNC_INTERVAL_MS,
+  DEFAULT_INITIAL_DELAY_MS,
+} from "./config";
 import type { Config } from "./config";
 import { createEmbedder } from "./embedder";
 import { SessionIndex } from "./session-index";
@@ -10,6 +17,65 @@ import { resolve } from "node:path";
 import { truncate, pathToSlug, formatRelativeDate } from "./utils";
 
 type AnyIndex = SessionIndex | FtsSessionIndex;
+
+/**
+ * Resolve the effective sync interval and return the timer action.
+ *
+ * - `undefined` → silent default (no warning)
+ * - `-1` → `{ disabled: true }` (no timer)
+ * - `> 0` → `{ disabled: false, intervalMs: <value> }` (timer fires every N ms)
+ * - other ≤ 0 → `{ disabled: false, intervalMs: DEFAULT, fallback: true }` (warn + default)
+ */
+export function resolveSyncAction(rawInterval?: number): {
+  disabled: boolean;
+  intervalMs?: number;
+  fallback?: boolean;
+} {
+  if (rawInterval === undefined)
+    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS };
+  if (rawInterval === -1) return { disabled: true };
+  if (rawInterval <= 0) {
+    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS, fallback: true };
+  }
+  return { disabled: false, intervalMs: rawInterval };
+}
+
+/**
+ * Resolve the initial startup sync delay and return the action.
+ *
+ * - `undefined` → silent default immediate (no warning)
+ * - `-1` → `{ skip: true }` (no initial sync)
+ * - `>= 0` → `{ skip: false, delayMs: <value> }` (sync after N ms, 0 = immediate)
+ * - other < 0 → `{ skip: false, delayMs: DEFAULT, fallback: true }` (warn + default)
+ */
+export function resolveInitialSyncAction(rawDelay?: number): {
+  skip: boolean;
+  delayMs?: number;
+  fallback?: boolean;
+} {
+  if (rawDelay === undefined)
+    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS };
+  if (rawDelay === -1) return { skip: true };
+  if (rawDelay < 0) {
+    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS, fallback: true };
+  }
+  return { skip: false, delayMs: rawDelay };
+}
+
+/**
+ * Detect whether this pi process is a child subagent or non-interactive
+ * programmatic invocation.
+ *
+ * Signals checked (any one triggers):
+ * - `PI_SUBAGENT_DEPTH > 0` — official pi-subagents child marker
+ * - `!process.stdin.isTTY` — non-interactive terminal (CI/CD, pipes, SDK embedders)
+ */
+export function isChildProcess(): boolean {
+  const depth = Number(process.env.PI_SUBAGENT_DEPTH);
+  if (depth > 0) return true;
+  if (!process.stdin.isTTY) return true;
+  return false;
+}
 
 export default function (pi: ExtensionAPI) {
   let sessionIndex: AnyIndex | null = null;
@@ -42,7 +108,8 @@ export default function (pi: ExtensionAPI) {
     return handle;
   }
 
-  const SYNC_INTERVAL_MS = 5 * 60 * 1000; // re-sync every 5 minutes
+  // Resolved from config at session_start; -1 means auto-sync disabled.
+  let effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
 
   // ------------------------------------------------------------------
   // Lifecycle
@@ -103,11 +170,30 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`session-search: ${err.message}`, "warning");
     }
 
+    // Apply configurable sync interval (from nested sync.interval)
+    let syncAction = resolveSyncAction(currentConfig?.sync?.interval);
+    effectiveSyncIntervalMs = syncAction.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
+
+    // Apply configurable initial sync delay (from nested sync.initialDelay)
+    let initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelay);
+
+    // Auto-disable for child processes if configured
+    if (currentConfig?.sync?.disableForChild && isChildProcess()) {
+      syncAction = { disabled: true };
+      initialAction = { skip: true };
+      ctx.ui.notify("session-search: sync auto-disabled (child process detected)", "info");
+    }
+
     // FTS5 works out of the box with no config; embeddings are optional.
-    void startIndex(currentConfig, ctx);
+    void startIndex(currentConfig, ctx, syncAction, initialAction);
   });
 
-  async function startIndex(config: Config | null, ctx: any) {
+  async function startIndex(
+    config: Config | null,
+    ctx: any,
+    syncAction?: ReturnType<typeof resolveSyncAction>,
+    initialAction?: ReturnType<typeof resolveInitialSyncAction>,
+  ) {
     try {
       if (config?.embedder) {
         const embedder = createEmbedder(config.embedder);
@@ -124,18 +210,38 @@ export default function (pi: ExtensionAPI) {
           config?.extraArchiveDirs ?? [],
         );
       }
+
+      // Load persisted index from disk (searches work immediately; runs v2→v3 migration)
       await sessionIndex.load();
+
+      // Resolve initial sync action (skip/delay/immediate)
+      const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
+      if (initAction.skip) {
+        ctx.ui.notify(
+          "session-search: initial sync skipped (set sync.initialDelay >= 0 to enable)",
+          "info",
+        );
+      } else if (initAction.fallback) {
+        ctx.ui.notify(
+          "session-search: invalid sync.initialDelay, falling back to immediate",
+          "warning",
+        );
+      }
 
       // Fire-and-forget: run initial sync in the background so startIndex
       // returns immediately and doesn't block pi's startup.
-      const SYNC_TIMEOUT_MS = 600_000;
-      Promise.race([
-        sessionIndex.sync(
-          (msg) => ctx.ui.setStatus("session-search", msg)
-        ),
-        new Promise<null>((resolve) => scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS)),
-      ])
-        .then((syncResult) => {
+      if (!initAction.skip) {
+        const SYNC_TIMEOUT_MS = 600_000;
+        const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
+        const runSync = () =>
+          Promise.race([
+            sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
+            new Promise<null>((resolve) =>
+              scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS),
+            ),
+          ]);
+
+        const handleSyncResult = (syncResult: Awaited<ReturnType<typeof runSync>>) => {
           if (shuttingDown) return;
           if (syncResult === null) {
             ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
@@ -151,41 +257,70 @@ export default function (pi: ExtensionAPI) {
               if (moved) parts.push(`↗${moved} moved`);
               ctx.ui.setStatus(
                 "session-search",
-                `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`
+                `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`,
               );
               scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
             }
           }
-        })
-        .catch((err) => {
-          if (shuttingDown) return;
-          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-          ctx.ui.setStatus("session-search", "");
-        });
+        };
+
+        if (delayMs > 0) {
+          scheduleTimer(async () => {
+            try {
+              handleSyncResult(await runSync());
+            } catch (err: any) {
+              if (shuttingDown) return;
+              ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+              ctx.ui.setStatus("session-search", "");
+            }
+          }, delayMs);
+        } else {
+          runSync()
+            .then(handleSyncResult)
+            .catch((err: any) => {
+              if (shuttingDown) return;
+              ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+              ctx.ui.setStatus("session-search", "");
+            });
+        }
+      }
 
       // Periodic background sync to pick up new/changed sessions
-      syncTimer = setInterval(async () => {
-        if (!sessionIndex || shuttingDown) return;
-        try {
-          const result = await sessionIndex.sync();
-          if (shuttingDown) return;
-          const changes = result.added + result.updated + result.removed + result.moved;
-          if (changes > 0) {
-            const parts = [];
-            if (result.added) parts.push(`+${result.added}`);
-            if (result.updated) parts.push(`~${result.updated}`);
-            if (result.removed) parts.push(`-${result.removed}`);
-            if (result.moved) parts.push(`↗${result.moved} moved`);
-            ctx.ui.setStatus(
-              "session-search",
-              `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
-            );
-            scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
+      const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);
+      if (action.disabled) {
+        ctx.ui.notify("session-search: auto-sync disabled (set sync.interval > 0 to re-enable)", "info");
+      } else if (action.fallback) {
+        ctx.ui.notify(
+          `session-search: invalid sync.interval, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
+          "warning",
+        );
+        effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
+      }
+
+      if (!action.disabled && effectiveSyncIntervalMs > 0) {
+        syncTimer = setInterval(async () => {
+          if (!sessionIndex || shuttingDown) return;
+          try {
+            const result = await sessionIndex.sync();
+            if (shuttingDown) return;
+            const changes = result.added + result.updated + result.removed + result.moved;
+            if (changes > 0) {
+              const parts = [];
+              if (result.added) parts.push(`+${result.added}`);
+              if (result.updated) parts.push(`~${result.updated}`);
+              if (result.removed) parts.push(`-${result.removed}`);
+              if (result.moved) parts.push(`↗${result.moved} moved`);
+              ctx.ui.setStatus(
+                "session-search",
+                `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
+              );
+              scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
+            }
+          } catch {
+            // Silent — don't spam on background sync failures
           }
-        } catch {
-          // Silent — don't spam on background sync failures
-        }
-      }, SYNC_INTERVAL_MS);
+        }, effectiveSyncIntervalMs);
+      }
     } catch (err: any) {
       ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
     }
