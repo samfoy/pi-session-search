@@ -5,6 +5,7 @@ import type { ParsedSession } from "./parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { Embedder } from "./embedder";
 import { buildContent, toFtsQuery } from "./fts-index";
+import { assertFts5Available } from "./fts5-probe";
 import { truncate, slugToProject, buildSummary } from "./utils";
 
 // ─── FTS side-car (for hybrid search) ────────────────────────────────
@@ -12,6 +13,8 @@ import { truncate, slugToProject, buildSummary } from "./utils";
 class FtsSide {
   private db: DatabaseSync;
   constructor(indexDir: string) {
+    // Fail fast on Node runtimes without FTS5 — see fts5-probe.ts.
+    assertFts5Available();
     this.db = new DatabaseSync(join(indexDir, "hybrid-fts.db"));
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec(

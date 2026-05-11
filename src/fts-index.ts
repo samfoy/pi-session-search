@@ -5,6 +5,7 @@ import type { ParsedSession } from "./parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { SearchResult, ListFilters } from "./session-index";
 import { truncate, buildSummary } from "./utils";
+import { assertFts5Available } from "./fts5-probe";
 
 /**
  * SQLite FTS5-backed session index. API-compatible with SessionIndex.
@@ -30,6 +31,12 @@ export class FtsSessionIndex {
   }
 
   async load(): Promise<void> {
+    // Fail fast with an actionable message on Node runtimes without FTS5
+    // (Node 22's bundled SQLite omits it). Without this probe the
+    // CREATE VIRTUAL TABLE below leaves the DB file with no tables and
+    // later queries surface "no such table: sessions".
+    assertFts5Available();
+
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec("PRAGMA busy_timeout = 5000;");
 

@@ -34,7 +34,7 @@ Or add to `~/.pi/agent/settings.json`:
 }
 ```
 
-Requires **Node 22.5+** (`node:sqlite` is used for FTS5). Node 24+ is recommended — `node:sqlite` is stable there. On Node 22 you'll see an `ExperimentalWarning` which is harmless.
+Requires **Node 24+** — `node:sqlite` must include FTS5, which Node 22's bundled SQLite does not. On Node 22 you'll get `Error: no such table: sessions` at startup because the FTS5 virtual table never gets created.
 
 ## Setup
 

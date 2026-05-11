@@ -235,7 +235,7 @@ export default function (pi: ExtensionAPI) {
         const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
         const runSync = () =>
           Promise.race([
-            sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
+            sessionIndex!.sync((msg) => ctx.ui.setStatus("session-search", msg)),
             new Promise<null>((resolve) =>
               scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS),
             ),
@@ -257,7 +257,7 @@ export default function (pi: ExtensionAPI) {
               if (moved) parts.push(`↗${moved} moved`);
               ctx.ui.setStatus(
                 "session-search",
-                `Sessions: ${parts.join(" ")} (${sessionIndex.size()} total)`,
+                `Sessions: ${parts.join(" ")} (${sessionIndex?.size() ?? 0} total)`,
               );
               scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
             }
@@ -322,6 +322,10 @@ export default function (pi: ExtensionAPI) {
         }, effectiveSyncIntervalMs);
       }
     } catch (err: any) {
+      // Failed init (e.g. FTS5 unavailable on Node 22) — clear the broken
+      // handle so downstream tool calls don't hit a half-initialized index
+      // and surface "no such table: sessions" or similar.
+      sessionIndex = null;
       ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
     }
   }
