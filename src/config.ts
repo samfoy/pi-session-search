@@ -105,6 +105,31 @@ function globalIndexDir(): string {
  *
  * Returns null when no project-local override is configured.
  */
+/**
+ * Emit a warning when a settings block contains keys outside a known
+ * schema. Catches silent typos like `LocalPath` vs `localPath` — an unknown
+ * key is usually a misspelled known key that got silently ignored, leaving
+ * the user wondering why their config didn't take effect.
+ *
+ * Logs to stderr (console.error) since this runs at startup; ctx.ui isn't
+ * reliably available here and the caller is in a code path that can't
+ * easily surface a UI notification.
+ */
+function warnUnknownKeys(block: unknown, blockName: string, knownKeys: readonly string[]): void {
+  if (!block || typeof block !== "object") return;
+  const unknown = Object.keys(block as Record<string, unknown>).filter((k) => !knownKeys.includes(k));
+  if (unknown.length === 0) return;
+  console.error(
+    `pi-session-search: ignoring unknown key(s) in settings.json "${blockName}" block: ${unknown.join(", ")} (expected: ${knownKeys.join(", ")})`,
+  );
+}
+
+// Keys pi-session-search reads from settings.json. The bulk of config lives
+// in a separate config.json (see getConfigPath) — only localPath comes from
+// the settings.json block directly.
+const PI_SESSION_SEARCH_SETTINGS_KEYS = ["localPath"] as const;
+const PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"] as const;
+
 export function resolveLocalBase(cwd?: string): string | null {
   if (!cwd) return null;
   try {
@@ -113,12 +138,14 @@ export function resolveLocalBase(cwd?: string): string | null {
 
     // Package-specific override wins.
     const ss = settings["pi-session-search"];
+    warnUnknownKeys(ss, "pi-session-search", PI_SESSION_SEARCH_SETTINGS_KEYS);
     if (ss && typeof ss === "object" && typeof ss.localPath === "string" && ss.localPath) {
       return ss.localPath;
     }
 
     // pi-total-recall cascade.
     const tr = settings["pi-total-recall"];
+    warnUnknownKeys(tr, "pi-total-recall", PI_TOTAL_RECALL_KNOWN_KEYS);
     if (tr && typeof tr === "object" && typeof tr.localPath === "string" && tr.localPath) {
       return join(tr.localPath, "session-search");
     }
