@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import {
   loadConfig,
@@ -116,28 +116,40 @@ export default function (pi: ExtensionAPI) {
   // ------------------------------------------------------------------
 
   // ------------------------------------------------------------------
-  // Session primer — inject recent session context before agent starts
+  // Session primer — inject recent session context ONCE at session_start.
+  //
+  // Historical note: earlier versions injected this on every before_agent_start
+  // hook. That was buggy in two ways:
+  //   (1) The custom message landed AFTER the user's message in history, so the
+  //       model responded to the primer instead of the user's actual question.
+  //   (2) The relative dates ("8m ago") drifted turn-to-turn, breaking provider
+  //       prefix caches.
+  // Matching pi-knowledge-search's pattern, we now inject once at session_start
+  // via pi.sendMessage, before any user message. Dedup via session history so
+  // /resume and re-opens don't double-inject.
   // ------------------------------------------------------------------
 
-  pi.on("before_agent_start", async (event, ctx) => {
+  function injectPrimer(ctx: {
+    sessionManager: { getEntries: () => SessionEntry[] };
+  }): void {
     if (!sessionIndex || sessionIndex.size() === 0) return;
 
     try {
-      const cwd = ctx.cwd || "";
-      // Derive a project slug from cwd to filter sessions
+      const alreadyInjected = ctx.sessionManager
+        .getEntries()
+        .some(
+          (e: SessionEntry) =>
+            e.type === "custom_message" && e.customType === "pi-session-search-primer",
+        );
+      if (alreadyInjected) return;
+
+      const cwd = sessionCwd || "";
       const projectSlug = cwd ? pathToSlug(cwd) : undefined;
 
-      // Get recent sessions, optionally filtered by project
-      let sessions = sessionIndex.list({
-        project: projectSlug,
-        limit: 5,
-      });
-
-      // Fall back to global recent if no project matches
+      let sessions = sessionIndex.list({ project: projectSlug, limit: 5 });
       if (sessions.length === 0 && projectSlug) {
         sessions = sessionIndex.list({ limit: 5 });
       }
-
       if (sessions.length === 0) return;
 
       const lines = sessions.map((s) => {
@@ -150,25 +162,19 @@ export default function (pi: ExtensionAPI) {
         return `- **${rel}**: **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${mode}`;
       });
 
-      const primer = `\n\n## Recent Sessions (this project)\n${lines.join("\n")}\n`;
-
-      // Keep it under 500 chars if possible
+      const primer = `## Recent Sessions (this project)\n${lines.join("\n")}\n`;
       const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
 
-      return {
-        message: {
-          customType: "pi-session-search-primer",
-          // Strip the leading blank lines — those only made sense when we were
-          // appending to a system prompt. As a standalone message they're noise.
-          content: trimmed.replace(/^\n+/, ""),
-          display: false,
-        },
-      };
+      pi.sendMessage({
+        customType: "pi-session-search-primer",
+        content: trimmed,
+        display: false,
+        details: { sessionCount: sessions.length },
+      });
     } catch {
-      // Don't block on primer failure
-      return undefined;
+      // Primer is nice-to-have; never break startup over it.
     }
-  });
+  }
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCwd = ctx.cwd;
@@ -221,6 +227,13 @@ export default function (pi: ExtensionAPI) {
 
       // Load persisted index from disk (searches work immediately; runs v2→v3 migration)
       await sessionIndex.load();
+
+      // Inject the "Recent Sessions" primer as a custom message BEFORE any
+      // user message arrives. Matches pi-knowledge-search's pattern and
+      // ensures the LLM sees the primer as pre-existing context, not as the
+      // last user message (which caused it to override user questions in
+      // pi-session-search 1.4.0).
+      injectPrimer(ctx);
 
       // Resolve initial sync action (skip/delay/immediate)
       const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);

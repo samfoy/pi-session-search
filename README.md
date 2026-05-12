@@ -9,7 +9,7 @@ Index, summarize, and search past [pi](https://github.com/badlogic/pi-mono) codi
 - **Browse & filter** — List sessions by project, date range, archive status (`session_list`)
 - **Read conversations** — View the full conversation from any past session (`session_read`)
 - **Auto-indexing** — Parses JSONL session files on startup, tracks changes incrementally
-- **Session primer** — Injects a short list of recent project sessions into each user turn as a hidden custom message (cache-friendly — does not mutate the system prompt)
+- **Session primer** — Injects a short list of recent project sessions as a hidden custom message at session start (before any user message — won't override your first question)
 - **Archive support** — Indexes both `~/.pi/agent/sessions/` and `~/.pi/agent/sessions-archive/`
 - **Multiple embedders** — OpenAI, Mistral, AWS Bedrock, local Ollama, or any OpenAI-compatible API
 
