@@ -1,6 +1,7 @@
 /**
  * Shared utility functions used across the session search package.
  */
+import { homedir } from "node:os";
 
 /** Truncate a string to `max` characters, appending "…" if truncated. */
 export function truncate(s: string, max: number): string {
@@ -44,7 +45,7 @@ export function formatRelativeDate(iso: string): string {
 
 /** Convert a cwd path to a project slug for filtering. */
 export function pathToSlug(cwd: string): string {
-  const home = process.env.HOME || "";
+  const home = homedir();
   const rel = cwd.startsWith(home) ? cwd.slice(home.length + 1) : cwd;
   return rel.replace(/\//g, "-");
 }

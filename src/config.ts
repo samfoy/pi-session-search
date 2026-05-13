@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import type { EmbedderConfig } from "./embedder";
 
@@ -80,7 +81,7 @@ export interface ConfigFile {
 
 // Lazy lookups so HOME changes at runtime (tests, sandboxes) are honored.
 function globalConfigDir(): string {
-  return join(process.env.HOME || "~", ".pi", "session-search");
+  return join(homedir(), ".pi", "session-search");
 }
 function globalConfigFile(): string {
   return join(globalConfigDir(), "config.json");
