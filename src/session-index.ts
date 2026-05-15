@@ -218,10 +218,14 @@ export class SessionIndex {
     const fileToId = new Map<string, string>();
     const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number; sizeBytes: number }>();
 
-    // Build a reverse lookup: sessionId → current indexed file path
-    const indexedIdToFile = new Map<string, string>();
+    // Pre-build a file→id lookup of the existing index so the
+    // discovered-file matching loop below is O(1) per file instead of
+    // O(N): with ~3k indexed sessions, the previous nested
+    // Object.entries scan was ~10M comparisons and ~4s of CPU on the
+    // critical path of session_start. See plan: Slice A.
+    const indexedFileToId = new Map<string, string>();
     for (const [id, entry] of Object.entries(this.data.sessions)) {
-      indexedIdToFile.set(id, entry.session.file);
+      indexedFileToId.set(entry.session.file, id);
     }
 
     for (const { file, archived } of discovered) {
@@ -235,14 +239,8 @@ export class SessionIndex {
         continue; // can't stat — skip
       }
 
-      // Try to match by checking if any indexed entry already has this file
-      let sessionId: string | null = null;
-      for (const [id, entry] of Object.entries(this.data.sessions)) {
-        if (entry.session.file === file) {
-          sessionId = id;
-          break;
-        }
-      }
+      // Try to match by precomputed file→id lookup
+      let sessionId: string | null = indexedFileToId.get(file) ?? null;
 
       // Not found in index by path — quick-read the header for the UUID
       if (!sessionId) {
