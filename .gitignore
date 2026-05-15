@@ -1,7 +1,5 @@
 node_modules/
-dist/
-*.js
-*.d.ts
-*.js.map
-!jest.config.js
 .pi/
+*.tsbuildinfo
+# dist/ committed: pi resolves local file:// packages without an install step,
+# so dist/ must be present in the repo for fresh clones to work.
