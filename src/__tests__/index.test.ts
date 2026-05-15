@@ -7,7 +7,8 @@ import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 
 import { toFtsQuery, buildContent, FtsSessionIndex } from "../fts-index";
 import { parseSession } from "../parser";
-import { encodeEmbedding, decodeEmbedding } from "../session-index";
+import { encodeEmbedding, decodeEmbedding, SessionIndex } from "../session-index";
+import type { Embedder } from "../embedder";
 import { loadConfig } from "../config";
 import { truncate, slugToProject, buildSummary, formatRelativeDate, pathToSlug } from "../utils";
 
@@ -494,6 +495,94 @@ describe("FtsSessionIndex.search with project filter", () => {
       assert.equal(results[0].session.id, "beta-001");
     } finally {
       idx.close();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── SessionIndex rediscovery (Slice A regression test) ───────────
+// Verifies that running sync() twice over the same on-disk session set
+// returns (added=0, updated=0, removed=0, moved=0) on the second pass.
+// This is the test critic flagged as missing in slice A: without it, the
+// precomputed file→id Map's correctness was unverified — every existing
+// test wiped the index between syncs, so the rediscovery code path was
+// never exercised with a hit.
+
+describe("SessionIndex rediscovery (Slice A regression)", () => {
+  const tmpRoot = join(import.meta.dirname ?? __dirname, "__tmp_rediscovery__");
+  const sessionsDir = join(tmpRoot, "sessions", "--proj--");
+  const indexDir = join(tmpRoot, "index");
+
+  // 512-dim deterministic stub embedder. Returns a hash-based vector so two
+  // identical inputs map to the same vector (good enough — we never search,
+  // only assert on the (added, updated, removed, moved) tuple).
+  const stubEmbedder: Embedder = {
+    async embed(text: string) {
+      return new Array(512).fill(0).map((_, i) => ((text.length + i) % 13) / 13);
+    },
+    async embedBatch(texts: string[]) {
+      return Promise.all(texts.map((t) => this.embed(t)));
+    },
+  };
+
+  function writeSession(id: string, userMsg: string): void {
+    mkdirSync(sessionsDir, { recursive: true });
+    const file = join(sessionsDir, `${id}.jsonl`);
+    const lines = [
+      JSON.stringify({
+        type: "session",
+        version: 1,
+        id,
+        timestamp: "2026-01-15T10:00:00Z",
+        cwd: "/tmp/proj",
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-01-15T10:00:01Z",
+        message: { role: "user", content: [{ type: "text", text: userMsg }] },
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "m2",
+        parentId: "m1",
+        timestamp: "2026-01-15T10:00:05Z",
+        message: {
+          role: "assistant",
+          provider: "anthropic",
+          model: "claude-sonnet",
+          content: [{ type: "text", text: "ok" }],
+        },
+      }),
+    ];
+    writeFileSync(file, lines.join("\n"), "utf8");
+  }
+
+  it("second sync on unchanged files returns (0,0,0,0)", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    writeSession("redisc-001", "hello");
+    writeSession("redisc-002", "world");
+    writeSession("redisc-003", "again");
+
+    const idx = new SessionIndex(
+      stubEmbedder,
+      indexDir,
+      [join(tmpRoot, "sessions")],
+      [],
+    );
+    try {
+      await idx.load();
+      const r1 = await idx.sync();
+      assert.ok(r1.added >= 3, `expected added >= 3, got ${r1.added}`);
+
+      const r2 = await idx.sync();
+      assert.deepEqual(
+        r2,
+        { added: 0, updated: 0, removed: 0, moved: 0 },
+        "second sync should be a no-op (verifies precomputed file→id map hits existing entries)",
+      );
+    } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
     }
   });

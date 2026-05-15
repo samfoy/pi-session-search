@@ -296,13 +296,21 @@ export default function (pi: ExtensionAPI) {
             }
           }, delayMs);
         } else {
-          runSync()
-            .then(handleSyncResult)
-            .catch((err: any) => {
-              if (shuttingDown) return;
-              ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-              ctx.ui.setStatus("session-search", "");
-            });
+          // Wrap in setImmediate so the sync chain runs in the next macrotask
+          // — after session_start's microtask drain, before_agent_start, and
+          // the first outbound model HTTP request. Combined with the
+          // setImmediate yield at the top of sync() itself, this keeps the
+          // initial sync entirely off the TTFT critical path even if a
+          // future change re-introduces synchronous CPU work in sync().
+          setImmediate(() => {
+            runSync()
+              .then(handleSyncResult)
+              .catch((err: any) => {
+                if (shuttingDown) return;
+                ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+                ctx.ui.setStatus("session-search", "");
+              });
+          });
         }
       }
 

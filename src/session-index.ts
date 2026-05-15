@@ -201,6 +201,16 @@ export class SessionIndex {
   async sync(
     onProgress?: (msg: string) => void
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
+    // Yield once so any awaiter (e.g. before_agent_start, the outbound
+    // model HTTP request) gets its turn before we touch disk. The
+    // synchronous prefix of this function ran 4s+ before the file→id
+    // Map fix in d965378; this guard ensures it can never block TTFT
+    // again even if a future change re-introduces hot CPU here.
+    await new Promise<void>((r) => setImmediate(r));
+
+    const __syncStartedAt = process.hrtime.bigint();
+
+    try {
     const discovered = discoverSessionFiles(
       this.extraSessionDirs,
       this.extraArchiveDirs,
@@ -223,6 +233,10 @@ export class SessionIndex {
     // O(N): with ~3k indexed sessions, the previous nested
     // Object.entries scan was ~10M comparisons and ~4s of CPU on the
     // critical path of session_start. See plan: Slice A.
+    //
+    // Last-write-wins on duplicate file paths; differs from the
+    // previous first-match O(N²) scan only in the (unreachable)
+    // corrupt-index case where two ids claim the same path.
     const indexedFileToId = new Map<string, string>();
     for (const [id, entry] of Object.entries(this.data.sessions)) {
       indexedFileToId.set(entry.session.file, id);
@@ -305,6 +319,7 @@ export class SessionIndex {
       return { added, updated, removed, moved };
     }
 
+
     onProgress?.(`Indexing ${toEmbed.length} sessions...`);
 
     // ── Phase 4: Parse + embed in batches ────────────────────────────
@@ -357,6 +372,15 @@ export class SessionIndex {
 
     this.save();
     return { added, updated, removed, moved };
+    } finally {
+      const __syncElapsedMs =
+        Number(process.hrtime.bigint() - __syncStartedAt) / 1e6;
+      if (__syncElapsedMs > 2000) {
+        onProgress?.(
+          `sync took ${__syncElapsedMs.toFixed(0)}ms — investigate`
+        );
+      }
+    }
   }
 
   /** Full rebuild — clear and re-index everything. */
