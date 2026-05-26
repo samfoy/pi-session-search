@@ -56,6 +56,17 @@ export interface Config {
   extraSessionDirs: string[];
   /** Extra archive directories to scan (in addition to default) */
   extraArchiveDirs: string[];
+  /**
+   * Override the default session directory (replaces the built-in default,
+   * which normally comes from `PI_SESSION_DIR` or `~/.pi/agent/sessions`).
+   */
+  sessionDir?: string;
+  /**
+   * Override the default archive directory (replaces the built-in default,
+   * which normally comes from `PI_SESSION_ARCHIVE_DIR` or
+   * `~/.pi/agent/sessions-archive`).
+   */
+  archiveDir?: string;
   /** Optional sync configuration — controls periodic re-sync behaviour. */
   sync?: SyncConfig;
   /** Optional embedder configuration — enables hybrid search when set */
@@ -65,6 +76,16 @@ export interface Config {
 export interface ConfigFile {
   extraSessionDirs?: string[];
   extraArchiveDirs?: string[];
+  /**
+   * Override the default session directory.
+   * @see Config.sessionDir
+   */
+  sessionDir?: string;
+  /**
+   * Override the default archive directory.
+   * @see Config.archiveDir
+   */
+  archiveDir?: string;
   /** Nested sync settings. */
   sync?: {
     /** Interval in ms; -1 disables auto-sync; other non-positive values fall back to default. */
@@ -195,6 +216,8 @@ export function loadConfig(cwd?: string): Config | null {
   return {
     extraSessionDirs: file.extraSessionDirs ?? [],
     extraArchiveDirs: file.extraArchiveDirs ?? [],
+    sessionDir: typeof file.sessionDir === "string" && file.sessionDir ? file.sessionDir : undefined,
+    archiveDir: typeof file.archiveDir === "string" && file.archiveDir ? file.archiveDir : undefined,
     sync: syncCfg,
     embedder: file.embedder,
   };

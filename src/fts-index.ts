@@ -17,15 +17,21 @@ export class FtsSessionIndex {
   private indexDir: string;
   private extraSessionDirs: string[];
   private extraArchiveDirs: string[];
+  private sessionDir?: string;
+  private archiveDir?: string;
 
   constructor(
     indexDir: string,
     extraSessionDirs: string[] = [],
     extraArchiveDirs: string[] = [],
+    sessionDir?: string,
+    archiveDir?: string,
   ) {
     this.indexDir = indexDir;
     this.extraSessionDirs = extraSessionDirs;
     this.extraArchiveDirs = extraArchiveDirs;
+    this.sessionDir = sessionDir;
+    this.archiveDir = archiveDir;
     mkdirSync(indexDir, { recursive: true });
     this.dbPath = join(indexDir, "sessions-fts.db");
   }
@@ -83,7 +89,7 @@ export class FtsSessionIndex {
   async sync(
     onProgress?: (msg: string) => void,
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
-    const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs);
+    const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
 
     let added = 0, updated = 0, removed = 0, moved = 0;
 

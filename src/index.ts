@@ -216,12 +216,16 @@ export default function (pi: ExtensionAPI) {
           getIndexDir(sessionCwd),
           config.extraSessionDirs,
           config.extraArchiveDirs,
+          config.sessionDir,
+          config.archiveDir,
         );
       } else {
         sessionIndex = new FtsSessionIndex(
           getIndexDir(sessionCwd),
           config?.extraSessionDirs ?? [],
           config?.extraArchiveDirs ?? [],
+          config?.sessionDir,
+          config?.archiveDir,
         );
       }
 

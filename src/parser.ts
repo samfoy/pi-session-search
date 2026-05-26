@@ -72,28 +72,46 @@ export interface ToolCallSummary {
 
 // ─── Discovery ───────────────────────────────────────────────────────
 
-const DEFAULT_SESSION_DIR = join(
-  process.env.HOME || "~",
-  ".pi",
-  "agent",
-  "sessions"
-);
-const DEFAULT_ARCHIVE_DIR = join(
-  process.env.HOME || "~",
-  ".pi",
-  "agent",
-  "sessions-archive"
-);
+/**
+ * Return the default session directory.
+ * Honours `PI_SESSION_DIR` env var (set by Pi when `settings.json` specifies
+ * a custom `sessionDir`), falling back to the standard global location.
+ */
+function getDefaultSessionDir(): string {
+  return (
+    process.env.PI_SESSION_DIR ||
+    join(process.env.HOME || "~", ".pi", "agent", "sessions")
+  );
+}
+
+/**
+ * Return the default session archive directory.
+ * Honours `PI_SESSION_ARCHIVE_DIR` env var, falling back to the standard
+ * global location.
+ */
+function getDefaultArchiveDir(): string {
+  return (
+    process.env.PI_SESSION_ARCHIVE_DIR ||
+    join(process.env.HOME || "~", ".pi", "agent", "sessions-archive")
+  );
+}
 
 /**
  * Find all .jsonl session files in the default + extra directories.
+ *
+ * @param extraSessionDirs  Additional session dirs to scan (appended to default).
+ * @param extraArchiveDirs  Additional archive dirs to scan (appended to default).
+ * @param sessionDir        Override the default session directory entirely.
+ * @param archiveDir        Override the default archive directory entirely.
  */
 export function discoverSessionFiles(
   extraSessionDirs: string[] = [],
   extraArchiveDirs: string[] = [],
+  sessionDir?: string,
+  archiveDir?: string,
 ): { file: string; archived: boolean }[] {
-  const sDirs = [DEFAULT_SESSION_DIR, ...extraSessionDirs];
-  const aDirs = [DEFAULT_ARCHIVE_DIR, ...extraArchiveDirs];
+  const sDirs = [sessionDir ?? getDefaultSessionDir(), ...extraSessionDirs];
+  const aDirs = [archiveDir ?? getDefaultArchiveDir(), ...extraArchiveDirs];
 
   const results: { file: string; archived: boolean }[] = [];
 

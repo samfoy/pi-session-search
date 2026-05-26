@@ -126,6 +126,8 @@ export class SessionIndex {
     private indexDir: string,
     private extraSessionDirs: string[] = [],
     private extraArchiveDirs: string[] = [],
+    private sessionDir?: string,
+    private archiveDir?: string,
   ) {
     mkdirSync(indexDir, { recursive: true });
     this.indexPath = join(indexDir, "session-index.json");
@@ -214,6 +216,8 @@ export class SessionIndex {
     const discovered = discoverSessionFiles(
       this.extraSessionDirs,
       this.extraArchiveDirs,
+      this.sessionDir,
+      this.archiveDir,
     );
 
     let added = 0;
