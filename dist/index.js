@@ -78,6 +78,7 @@ function loadConfig(cwd) {
     extraSessionDirs: file.extraSessionDirs ?? [],
     extraArchiveDirs: file.extraArchiveDirs ?? [],
     sync: syncCfg,
+    primer: file.primer,
     embedder: file.embedder
   };
 }
@@ -1503,7 +1504,11 @@ ${lines.join("\n")}
         );
       }
       await sessionIndex.load();
-      injectPrimer(ctx);
+      if (config?.primer?.enabled === false) {
+        ctx.ui.notify("session-search: primer disabled via config", "info");
+      } else {
+        injectPrimer(ctx);
+      }
       const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
       if (initAction.skip) {
         ctx.ui.notify(

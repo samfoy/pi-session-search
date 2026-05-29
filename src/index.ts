@@ -237,7 +237,12 @@ export default function (pi: ExtensionAPI) {
       // ensures the LLM sees the primer as pre-existing context, not as the
       // last user message (which caused it to override user questions in
       // pi-session-search 1.4.0).
-      injectPrimer(ctx);
+      // Skip when explicitly disabled via config (`primer.enabled = false`).
+      if (config?.primer?.enabled === false) {
+        ctx.ui.notify("session-search: primer disabled via config", "info");
+      } else {
+        injectPrimer(ctx);
+      }
 
       // Resolve initial sync action (skip/delay/immediate)
       const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);

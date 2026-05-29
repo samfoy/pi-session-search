@@ -69,6 +69,8 @@ export interface Config {
   archiveDir?: string;
   /** Optional sync configuration — controls periodic re-sync behaviour. */
   sync?: SyncConfig;
+  /** Optional primer configuration — controls session-primer injection at session_start. */
+  primer?: { enabled?: boolean };
   /** Optional embedder configuration — enables hybrid search when set */
   embedder?: EmbedderConfig;
 }
@@ -95,6 +97,8 @@ export interface ConfigFile {
     /** Auto-disable sync when running as a subagent child or non-interactively. */
     disableForChild?: boolean;
   };
+  /** Nested primer settings. Set { enabled: false } to disable the "Recent Sessions" injection at session_start. */
+  primer?: { enabled?: boolean };
   embedder?: EmbedderConfig;
 }
 
@@ -219,6 +223,7 @@ export function loadConfig(cwd?: string): Config | null {
     sessionDir: typeof file.sessionDir === "string" && file.sessionDir ? file.sessionDir : undefined,
     archiveDir: typeof file.archiveDir === "string" && file.archiveDir ? file.archiveDir : undefined,
     sync: syncCfg,
+    primer: file.primer,
     embedder: file.embedder,
   };
 }
