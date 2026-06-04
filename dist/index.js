@@ -77,6 +77,8 @@ function loadConfig(cwd) {
   return {
     extraSessionDirs: file.extraSessionDirs ?? [],
     extraArchiveDirs: file.extraArchiveDirs ?? [],
+    sessionDir: typeof file.sessionDir === "string" && file.sessionDir ? file.sessionDir : void 0,
+    archiveDir: typeof file.archiveDir === "string" && file.archiveDir ? file.archiveDir : void 0,
     sync: syncCfg,
     primer: file.primer,
     embedder: file.embedder
@@ -90,7 +92,7 @@ function saveConfig(file, cwd) {
 
 // src/embedder.ts
 var DEFAULTS = {
-  openai: { model: "text-embedding-3-small", dimensions: 512, baseUrl: "https://api.openai.com" },
+  openai: { model: "text-embedding-3-small", dimensions: 512, baseUrl: "https://api.openai.com", sendDimensions: true },
   bedrock: {
     model: "amazon.titan-embed-text-v2:0",
     region: "us-east-1",
@@ -98,8 +100,8 @@ var DEFAULTS = {
     dimensions: 512
   },
   ollama: { model: "nomic-embed-text", url: "http://localhost:11434" },
-  mistral: { model: "mistral-embed", dimensions: 1024, baseUrl: "https://api.mistral.ai" },
-  "openai-compatible": { model: "text-embedding-3-small", dimensions: 512 }
+  mistral: { model: "mistral-embed", dimensions: 1024, baseUrl: "https://api.mistral.ai", sendDimensions: false },
+  "openai-compatible": { model: "text-embedding-3-small", dimensions: 512, sendDimensions: false }
 };
 function createEmbedder(config) {
   const defaults = DEFAULTS[config.type] ?? {};
@@ -110,14 +112,16 @@ function createEmbedder(config) {
         merged.apiKey || process.env.OPENAI_API_KEY || "",
         merged.model,
         merged.dimensions,
-        merged.baseUrl || "https://api.openai.com"
+        merged.baseUrl || "https://api.openai.com",
+        merged.sendDimensions ?? true
       );
     case "mistral":
       return new OpenAICompatibleEmbedder(
         merged.apiKey || process.env.MISTRAL_API_KEY || "",
         merged.model,
         merged.dimensions,
-        merged.baseUrl || "https://api.mistral.ai"
+        merged.baseUrl || "https://api.mistral.ai",
+        merged.sendDimensions ?? false
       );
     case "openai-compatible": {
       if (!merged.baseUrl) throw new Error("openai-compatible requires baseUrl");
@@ -125,7 +129,8 @@ function createEmbedder(config) {
         merged.apiKey || "",
         merged.model,
         merged.dimensions,
-        merged.baseUrl
+        merged.baseUrl,
+        merged.sendDimensions ?? false
       );
     }
     case "bedrock":
@@ -160,15 +165,17 @@ async function parallelMap(items, fn, concurrency, signal) {
   return results;
 }
 var OpenAICompatibleEmbedder = class {
-  constructor(apiKey, model, dimensions, baseUrl) {
+  constructor(apiKey, model, dimensions, baseUrl, sendDimensions) {
     this.apiKey = apiKey;
     this.model = model;
     this.dimensions = dimensions;
+    this.sendDimensions = sendDimensions;
     this.endpoint = `${baseUrl.replace(/\/$/, "")}/v1/embeddings`;
   }
   apiKey;
   model;
   dimensions;
+  sendDimensions;
   endpoint;
   async embed(text, signal) {
     const [result] = await this.embedBatch([text], signal);
@@ -185,7 +192,7 @@ var OpenAICompatibleEmbedder = class {
         input: batch,
         model: this.model
       };
-      if (this.dimensions && !this.endpoint.includes("mistral.ai")) {
+      if (this.dimensions && this.sendDimensions) {
         body.dimensions = this.dimensions;
       }
       const res = await fetch(this.endpoint, {
@@ -303,21 +310,15 @@ import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 // src/parser.ts
 import { readFileSync as readFileSync2, readdirSync, existsSync as existsSync2, openSync, readSync, closeSync } from "node:fs";
 import { join as join2, basename, dirname as dirname2 } from "node:path";
-var DEFAULT_SESSION_DIR = join2(
-  process.env.HOME || "~",
-  ".pi",
-  "agent",
-  "sessions"
-);
-var DEFAULT_ARCHIVE_DIR = join2(
-  process.env.HOME || "~",
-  ".pi",
-  "agent",
-  "sessions-archive"
-);
-function discoverSessionFiles(extraSessionDirs = [], extraArchiveDirs = []) {
-  const sDirs = [DEFAULT_SESSION_DIR, ...extraSessionDirs];
-  const aDirs = [DEFAULT_ARCHIVE_DIR, ...extraArchiveDirs];
+function getDefaultSessionDir() {
+  return process.env.PI_SESSION_DIR || join2(process.env.HOME || "~", ".pi", "agent", "sessions");
+}
+function getDefaultArchiveDir() {
+  return process.env.PI_SESSION_ARCHIVE_DIR || join2(process.env.HOME || "~", ".pi", "agent", "sessions-archive");
+}
+function discoverSessionFiles(extraSessionDirs = [], extraArchiveDirs = [], sessionDir, archiveDir) {
+  const sDirs = [sessionDir ?? getDefaultSessionDir(), ...extraSessionDirs];
+  const aDirs = [archiveDir ?? getDefaultArchiveDir(), ...extraArchiveDirs];
   const results = [];
   for (const dir of sDirs) {
     if (!existsSync2(dir)) continue;
@@ -616,10 +617,14 @@ var FtsSessionIndex = class {
   indexDir;
   extraSessionDirs;
   extraArchiveDirs;
-  constructor(indexDir, extraSessionDirs = [], extraArchiveDirs = []) {
+  sessionDir;
+  archiveDir;
+  constructor(indexDir, extraSessionDirs = [], extraArchiveDirs = [], sessionDir, archiveDir) {
     this.indexDir = indexDir;
     this.extraSessionDirs = extraSessionDirs;
     this.extraArchiveDirs = extraArchiveDirs;
+    this.sessionDir = sessionDir;
+    this.archiveDir = archiveDir;
     mkdirSync2(indexDir, { recursive: true });
     this.dbPath = join3(indexDir, "sessions-fts.db");
   }
@@ -660,8 +665,8 @@ var FtsSessionIndex = class {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM sessions").get();
     return Number(row?.n ?? 0);
   }
-  async sync(onProgress) {
-    const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs);
+  async sync(onProgress, _onError) {
+    const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
     let added = 0, updated = 0, removed = 0, moved = 0;
     const idToFile = /* @__PURE__ */ new Map();
     for (const { file, archived } of discovered) {
@@ -759,9 +764,9 @@ var FtsSessionIndex = class {
     this.db.exec("COMMIT");
     return { added, updated, removed, moved };
   }
-  async rebuild(onProgress) {
+  async rebuild(onProgress, onError) {
     this.db.exec("DELETE FROM sessions");
-    await this.sync(onProgress);
+    await this.sync(onProgress, onError);
   }
   async search(query, limit = 10, _signal, project) {
     const fts = toFtsQuery(query);
@@ -914,11 +919,13 @@ function stripHeavyFields(session) {
   };
 }
 var SessionIndex = class {
-  constructor(embedder, indexDir, extraSessionDirs = [], extraArchiveDirs = []) {
+  constructor(embedder, indexDir, extraSessionDirs = [], extraArchiveDirs = [], sessionDir, archiveDir) {
     this.embedder = embedder;
     this.indexDir = indexDir;
     this.extraSessionDirs = extraSessionDirs;
     this.extraArchiveDirs = extraArchiveDirs;
+    this.sessionDir = sessionDir;
+    this.archiveDir = archiveDir;
     mkdirSync3(indexDir, { recursive: true });
     this.indexPath = join4(indexDir, "session-index.json");
     this.fts = new FtsSide(indexDir);
@@ -927,6 +934,8 @@ var SessionIndex = class {
   indexDir;
   extraSessionDirs;
   extraArchiveDirs;
+  sessionDir;
+  archiveDir;
   data = { version: INDEX_VERSION, sessions: {} };
   indexPath;
   fts;
@@ -987,18 +996,21 @@ var SessionIndex = class {
    * Sync: discover sessions, parse new/changed ones, handle moves, remove
    * sessions whose files no longer exist anywhere.
    */
-  async sync(onProgress) {
+  async sync(onProgress, onError) {
     await new Promise((r) => setImmediate(r));
     const __syncStartedAt = process.hrtime.bigint();
     try {
       const discovered = discoverSessionFiles(
         this.extraSessionDirs,
-        this.extraArchiveDirs
+        this.extraArchiveDirs,
+        this.sessionDir,
+        this.archiveDir
       );
       let added = 0;
       let updated = 0;
       let removed = 0;
       let moved = 0;
+      let reportedEmbeddingFailure = false;
       const fileToId = /* @__PURE__ */ new Map();
       const idToFile = /* @__PURE__ */ new Map();
       const indexedFileToId = /* @__PURE__ */ new Map();
@@ -1090,7 +1102,12 @@ var SessionIndex = class {
             else added++;
           }
         } catch (err) {
-          onProgress?.(`Embedding batch failed: ${err.message}`);
+          const msg = `Embedding batch failed: ${err.message}`;
+          if (!reportedEmbeddingFailure) {
+            onError?.(msg);
+            reportedEmbeddingFailure = true;
+          }
+          onProgress?.(msg);
         }
         onProgress?.(
           `Indexed ${Math.min(i + BATCH_SIZE, toEmbed.length)}/${toEmbed.length}...`
@@ -1108,10 +1125,10 @@ var SessionIndex = class {
     }
   }
   /** Full rebuild — clear and re-index everything. */
-  async rebuild(onProgress) {
+  async rebuild(onProgress, onError) {
     this.data = { version: INDEX_VERSION, sessions: {} };
     this.fts.clear();
-    await this.sync(onProgress);
+    await this.sync(onProgress, onError);
   }
   /**
    * Hybrid search: cosine embeddings + FTS5 BM25, fused via Reciprocal Rank
@@ -1486,6 +1503,9 @@ ${lines.join("\n")}
     }
     void startIndex(currentConfig, ctx, syncAction, initialAction);
   });
+  function notifySyncError(ctx) {
+    return (msg) => ctx.ui.notify(`session-search: ${msg}`, "warning");
+  }
   async function startIndex(config, ctx, syncAction, initialAction) {
     try {
       if (config?.embedder) {
@@ -1494,13 +1514,17 @@ ${lines.join("\n")}
           embedder,
           getIndexDir(sessionCwd),
           config.extraSessionDirs,
-          config.extraArchiveDirs
+          config.extraArchiveDirs,
+          config.sessionDir,
+          config.archiveDir
         );
       } else {
         sessionIndex = new FtsSessionIndex(
           getIndexDir(sessionCwd),
           config?.extraSessionDirs ?? [],
-          config?.extraArchiveDirs ?? []
+          config?.extraArchiveDirs ?? [],
+          config?.sessionDir,
+          config?.archiveDir
         );
       }
       await sessionIndex.load();
@@ -1525,7 +1549,10 @@ ${lines.join("\n")}
         const SYNC_TIMEOUT_MS = 6e5;
         const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
         const runSync = () => Promise.race([
-          sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg)),
+          sessionIndex.sync(
+            (msg) => ctx.ui.setStatus("session-search", msg),
+            notifySyncError(ctx)
+          ),
           new Promise(
             (resolve2) => scheduleTimer(() => resolve2(null), SYNC_TIMEOUT_MS)
           )
@@ -1716,12 +1743,17 @@ ${lines.join("\n")}
           const apiKey = await ctx.ui.input("API key:", "");
           const model = await ctx.ui.input("Model:", "");
           const dims = await ctx.ui.input("Dimensions (e.g. 512, 1024):", "512");
+          const sendDims = await ctx.ui.input(
+            "Send dimensions parameter? (true only for models that support it):",
+            "false"
+          );
           embedder = {
             type: "openai-compatible",
             baseUrl: baseUrl.replace(/\/$/, ""),
             apiKey: apiKey || void 0,
             model: model || void 0,
-            dimensions: parseInt(dims || "512", 10)
+            dimensions: parseInt(dims || "512", 10),
+            sendDimensions: sendDims?.toLowerCase() === "true"
           };
           break;
         }
@@ -1753,7 +1785,10 @@ ${lines.join("\n")}
         return;
       }
       try {
-        const r = await sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg));
+        const r = await sessionIndex.sync(
+          (msg) => ctx.ui.setStatus("session-search", msg),
+          notifySyncError(ctx)
+        );
         const parts = [];
         if (r.added) parts.push(`+${r.added}`);
         if (r.updated) parts.push(`~${r.updated}`);
@@ -1782,7 +1817,8 @@ ${lines.join("\n")}
       ctx.ui.notify("Re-indexing sessions...", "info");
       try {
         await sessionIndex.rebuild(
-          (msg) => ctx.ui.setStatus("session-search", msg)
+          (msg) => ctx.ui.setStatus("session-search", msg),
+          notifySyncError(ctx)
         );
         ctx.ui.notify(
           `Re-indexed: ${sessionIndex.size()} sessions`,

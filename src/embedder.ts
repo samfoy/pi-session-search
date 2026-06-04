@@ -17,6 +17,13 @@ export interface EmbedderConfig {
   apiKey?: string;
   model?: string;
   baseUrl?: string;
+  /**
+   * Opt in to sending the OpenAI `dimensions` request parameter.
+   *
+   * Only some embedding models support matryoshka dimension reduction. OpenAI's
+   * text-embedding-3 models do; most OpenAI-compatible providers do not.
+   */
+  sendDimensions?: boolean;
   // Bedrock
   profile?: string;
   region?: string;
@@ -27,7 +34,7 @@ export interface EmbedderConfig {
 }
 
 const DEFAULTS: Record<string, Partial<EmbedderConfig>> = {
-  openai: { model: "text-embedding-3-small", dimensions: 512, baseUrl: "https://api.openai.com" },
+  openai: { model: "text-embedding-3-small", dimensions: 512, baseUrl: "https://api.openai.com", sendDimensions: true },
   bedrock: {
     model: "amazon.titan-embed-text-v2:0",
     region: "us-east-1",
@@ -35,8 +42,8 @@ const DEFAULTS: Record<string, Partial<EmbedderConfig>> = {
     dimensions: 512,
   },
   ollama: { model: "nomic-embed-text", url: "http://localhost:11434" },
-  mistral: { model: "mistral-embed", dimensions: 1024, baseUrl: "https://api.mistral.ai" },
-  "openai-compatible": { model: "text-embedding-3-small", dimensions: 512 },
+  mistral: { model: "mistral-embed", dimensions: 1024, baseUrl: "https://api.mistral.ai", sendDimensions: false },
+  "openai-compatible": { model: "text-embedding-3-small", dimensions: 512, sendDimensions: false },
 };
 
 export function createEmbedder(config: EmbedderConfig): Embedder {
@@ -49,14 +56,16 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
         merged.apiKey || process.env.OPENAI_API_KEY || "",
         merged.model!,
         merged.dimensions!,
-        merged.baseUrl || "https://api.openai.com"
+        merged.baseUrl || "https://api.openai.com",
+        merged.sendDimensions ?? true
       );
     case "mistral":
       return new OpenAICompatibleEmbedder(
         merged.apiKey || process.env.MISTRAL_API_KEY || "",
         merged.model!,
         merged.dimensions!,
-        merged.baseUrl || "https://api.mistral.ai"
+        merged.baseUrl || "https://api.mistral.ai",
+        merged.sendDimensions ?? false
       );
     case "openai-compatible": {
       if (!merged.baseUrl) throw new Error("openai-compatible requires baseUrl");
@@ -64,7 +73,8 @@ export function createEmbedder(config: EmbedderConfig): Embedder {
         merged.apiKey || "",
         merged.model!,
         merged.dimensions!,
-        merged.baseUrl
+        merged.baseUrl,
+        merged.sendDimensions ?? false
       );
     }
     case "bedrock":
@@ -117,7 +127,8 @@ class OpenAICompatibleEmbedder implements Embedder {
     private apiKey: string,
     private model: string,
     private dimensions: number,
-    baseUrl: string
+    baseUrl: string,
+    private sendDimensions: boolean
   ) {
     this.endpoint = `${baseUrl.replace(/\/$/, "")}/v1/embeddings`;
   }
@@ -143,8 +154,7 @@ class OpenAICompatibleEmbedder implements Embedder {
         input: batch,
         model: this.model,
       };
-      // Mistral doesn't support the dimensions parameter
-      if (this.dimensions && !this.endpoint.includes("mistral.ai")) {
+      if (this.dimensions && this.sendDimensions) {
         body.dimensions = this.dimensions;
       }
 

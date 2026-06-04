@@ -201,7 +201,8 @@ export class SessionIndex {
    * sessions whose files no longer exist anywhere.
    */
   async sync(
-    onProgress?: (msg: string) => void
+    onProgress?: (msg: string) => void,
+    onError?: (msg: string) => void
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
     // Yield once so any awaiter (e.g. before_agent_start, the outbound
     // model HTTP request) gets its turn before we touch disk. The
@@ -224,6 +225,7 @@ export class SessionIndex {
     let updated = 0;
     let removed = 0;
     let moved = 0;
+    let reportedEmbeddingFailure = false;
 
     // ── Phase 1: Build a map of discovered files → session ID ────────
     // We need session IDs to correlate with the index. For files already
@@ -366,7 +368,12 @@ export class SessionIndex {
           else added++;
         }
       } catch (err: any) {
-        onProgress?.(`Embedding batch failed: ${err.message}`);
+        const msg = `Embedding batch failed: ${err.message}`;
+        if (!reportedEmbeddingFailure) {
+          onError?.(msg);
+          reportedEmbeddingFailure = true;
+        }
+        onProgress?.(msg);
       }
 
       onProgress?.(
@@ -388,10 +395,10 @@ export class SessionIndex {
   }
 
   /** Full rebuild — clear and re-index everything. */
-  async rebuild(onProgress?: (msg: string) => void): Promise<void> {
+  async rebuild(onProgress?: (msg: string) => void, onError?: (msg: string) => void): Promise<void> {
     this.data = { version: INDEX_VERSION, sessions: {} };
     this.fts.clear();
-    await this.sync(onProgress);
+    await this.sync(onProgress, onError);
   }
 
   /**

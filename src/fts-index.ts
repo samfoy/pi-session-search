@@ -88,6 +88,7 @@ export class FtsSessionIndex {
 
   async sync(
     onProgress?: (msg: string) => void,
+    _onError?: (msg: string) => void,
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
     const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
 
@@ -201,9 +202,9 @@ export class FtsSessionIndex {
     return { added, updated, removed, moved };
   }
 
-  async rebuild(onProgress?: (msg: string) => void): Promise<void> {
+  async rebuild(onProgress?: (msg: string) => void, onError?: (msg: string) => void): Promise<void> {
     this.db.exec("DELETE FROM sessions");
-    await this.sync(onProgress);
+    await this.sync(onProgress, onError);
   }
 
   async search(query: string, limit = 10, _signal?: AbortSignal, project?: string): Promise<SearchResult[]> {

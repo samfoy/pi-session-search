@@ -202,6 +202,10 @@ export default function (pi: ExtensionAPI) {
     void startIndex(currentConfig, ctx, syncAction, initialAction);
   });
 
+  function notifySyncError(ctx: any): (msg: string) => void {
+    return (msg: string) => ctx.ui.notify(`session-search: ${msg}`, "warning");
+  }
+
   async function startIndex(
     config: Config | null,
     ctx: any,
@@ -265,7 +269,10 @@ export default function (pi: ExtensionAPI) {
         const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
         const runSync = () =>
           Promise.race([
-            sessionIndex!.sync((msg) => ctx.ui.setStatus("session-search", msg)),
+            sessionIndex!.sync(
+              (msg) => ctx.ui.setStatus("session-search", msg),
+              notifySyncError(ctx),
+            ),
             new Promise<null>((resolve) =>
               scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS),
             ),
@@ -489,12 +496,17 @@ export default function (pi: ExtensionAPI) {
           const apiKey = await ctx.ui.input("API key:", "");
           const model = await ctx.ui.input("Model:", "");
           const dims = await ctx.ui.input("Dimensions (e.g. 512, 1024):", "512");
+          const sendDims = await ctx.ui.input(
+            "Send dimensions parameter? (true only for models that support it):",
+            "false"
+          );
           embedder = {
             type: "openai-compatible" as const,
             baseUrl: baseUrl.replace(/\/$/, ""),
             apiKey: apiKey || undefined,
             model: model || undefined,
             dimensions: parseInt(dims || "512", 10),
+            sendDimensions: sendDims?.toLowerCase() === "true",
           };
           break;
         }
@@ -538,7 +550,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       try {
-        const r = await sessionIndex.sync((msg) => ctx.ui.setStatus("session-search", msg));
+        const r = await sessionIndex.sync(
+          (msg) => ctx.ui.setStatus("session-search", msg),
+          notifySyncError(ctx),
+        );
         const parts: string[] = [];
         if (r.added) parts.push(`+${r.added}`);
         if (r.updated) parts.push(`~${r.updated}`);
@@ -571,8 +586,9 @@ export default function (pi: ExtensionAPI) {
       }
       ctx.ui.notify("Re-indexing sessions...", "info");
       try {
-        await sessionIndex.rebuild((msg) =>
-          ctx.ui.setStatus("session-search", msg)
+        await sessionIndex.rebuild(
+          (msg) => ctx.ui.setStatus("session-search", msg),
+          notifySyncError(ctx),
         );
         ctx.ui.notify(
           `Re-indexed: ${sessionIndex.size()} sessions`,

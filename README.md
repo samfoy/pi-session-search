@@ -95,6 +95,20 @@ Many embedding providers expose an OpenAI-compatible `/v1/embeddings` endpoint. 
 }
 ```
 
+`openai-compatible` does **not** send the `dimensions` request parameter by default because many compatible providers reject it. If your model explicitly supports matryoshka dimension reduction (for example OpenAI `text-embedding-3-*` behind a proxy), opt in:
+
+```json
+{
+  "embedder": {
+    "type": "openai-compatible",
+    "baseUrl": "https://your-proxy.example.com",
+    "model": "text-embedding-3-small",
+    "dimensions": 512,
+    "sendDimensions": true
+  }
+}
+```
+
 This works with Together, Fireworks, vLLM, LiteLLM, Anyscale, and any other provider that implements the OpenAI embeddings format.
 
 ## Usage

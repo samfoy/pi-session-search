@@ -500,6 +500,75 @@ describe("FtsSessionIndex.search with project filter", () => {
   });
 });
 
+// ─── SessionIndex embedding errors ─────────────────────────────────
+
+describe("SessionIndex embedding errors", () => {
+  const tmpRoot = join(import.meta.dirname ?? __dirname, "__tmp_embedding_error__");
+  const sessionsDir = join(tmpRoot, "sessions", "--proj--");
+  const indexDir = join(tmpRoot, "index");
+
+  const failingEmbedder: Embedder = {
+    async embed() {
+      throw new Error("boom");
+    },
+    async embedBatch() {
+      throw new Error("boom");
+    },
+  };
+
+  function writeSession(id: string): void {
+    mkdirSync(sessionsDir, { recursive: true });
+    const file = join(sessionsDir, `${id}.jsonl`);
+    const lines = [
+      JSON.stringify({
+        type: "session",
+        version: 1,
+        id,
+        timestamp: "2026-01-15T10:00:00Z",
+        cwd: "/tmp/proj",
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "m1",
+        parentId: null,
+        timestamp: "2026-01-15T10:00:01Z",
+        message: { role: "user", content: [{ type: "text", text: "hello" }] },
+      }),
+    ];
+    writeFileSync(file, lines.join("\n"), "utf8");
+  }
+
+  it("reports the first embedding batch failure through onError", async () => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+    writeSession("embed-error-001");
+
+    const idx = new SessionIndex(
+      failingEmbedder,
+      indexDir,
+      [],
+      [],
+      join(tmpRoot, "sessions"),
+      join(tmpRoot, "archive"),
+    );
+    const errors: string[] = [];
+    const progress: string[] = [];
+    try {
+      await idx.load();
+      const result = await idx.sync(
+        (msg) => progress.push(msg),
+        (msg) => errors.push(msg),
+      );
+
+      assert.deepEqual(result, { added: 0, updated: 0, removed: 0, moved: 0 });
+      assert.deepEqual(errors, ["Embedding batch failed: boom"]);
+      assert.ok(progress.includes("Embedding batch failed: boom"));
+      assert.equal(idx.size(), 0);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 // ─── SessionIndex rediscovery (Slice A regression test) ───────────
 // Verifies that running sync() twice over the same on-disk session set
 // returns (added=0, updated=0, removed=0, moved=0) on the second pass.
@@ -568,8 +637,10 @@ describe("SessionIndex rediscovery (Slice A regression)", () => {
     const idx = new SessionIndex(
       stubEmbedder,
       indexDir,
-      [join(tmpRoot, "sessions")],
       [],
+      [],
+      join(tmpRoot, "sessions"),
+      join(tmpRoot, "archive"),
     );
     try {
       await idx.load();
