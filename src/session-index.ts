@@ -128,6 +128,7 @@ export class SessionIndex {
     private extraArchiveDirs: string[] = [],
     private sessionDir?: string,
     private archiveDir?: string,
+    private fusion: "rrf" | "vector-primary" = "rrf",
   ) {
     mkdirSync(indexDir, { recursive: true });
     this.indexPath = join(indexDir, "session-index.json");
@@ -449,13 +450,31 @@ export class SessionIndex {
 
     const ftsRanks = this.fts.searchRanks(query, poolSize, allowedIds);
 
-    // RRF fusion: score = Σ 1 / (k + rank)
-    const K = 60;
-    const fused = new Map<string, number>();
-    for (const [id, r] of cosineRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
-    for (const [id, r] of ftsRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+    let sorted: [string, number][];
 
-    const sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    if (this.fusion === "vector-primary") {
+      // Preserve cosine order; append top FTS hits that vector arm missed.
+      // This avoids FTS noise demoting correct vector results for non-English
+      // corpora where morphological variance causes FTS to carry no signal.
+      const ids = cosineScored.slice(0, limit).map((s) => s.entry.session.id);
+      const ftsAppendLimit = 5;
+      let appended = 0;
+      for (const [id] of ftsRanks) {
+        if (appended >= ftsAppendLimit) break;
+        if (!ids.includes(id)) {
+          ids.push(id);
+          appended++;
+        }
+      }
+      sorted = ids.slice(0, limit).map((id, rank) => [id, 1 / (60 + rank + 1)] as [string, number]);
+    } else {
+      // RRF fusion: score = Σ 1 / (k + rank)
+      const K = 60;
+      const fused = new Map<string, number>();
+      for (const [id, r] of cosineRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+      for (const [id, r] of ftsRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+      sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    }
 
     return sorted
       .map(([id, score]) => {

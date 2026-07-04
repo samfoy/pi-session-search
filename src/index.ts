@@ -222,6 +222,7 @@ export default function (pi: ExtensionAPI) {
           config.extraArchiveDirs,
           config.sessionDir,
           config.archiveDir,
+          config.fusion,
         );
       } else {
         sessionIndex = new FtsSessionIndex(

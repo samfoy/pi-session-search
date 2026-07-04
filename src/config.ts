@@ -73,6 +73,18 @@ export interface Config {
   primer?: { enabled?: boolean };
   /** Optional embedder configuration — enables hybrid search when set */
   embedder?: EmbedderConfig;
+  /**
+   * Fusion strategy used when combining cosine (vector) and FTS ranks.
+   *
+   * - `"rrf"` (default): Reciprocal Rank Fusion — blends both arms equally.
+   *   Works well for English corpora where FTS adds genuine recall.
+   * - `"vector-primary"`: Preserve cosine order; append top-5 FTS hits that
+   *   the vector arm missed. Recommended for non-English corpora where FTS
+   *   adds noise and demotes correct vector results.
+   *
+   * @default "rrf"
+   */
+  fusion?: "rrf" | "vector-primary";
 }
 
 export interface ConfigFile {
@@ -100,6 +112,11 @@ export interface ConfigFile {
   /** Nested primer settings. Set { enabled: false } to disable the "Recent Sessions" injection at session_start. */
   primer?: { enabled?: boolean };
   embedder?: EmbedderConfig;
+  /**
+   * Fusion strategy. See `Config.fusion` for details.
+   * @default "rrf"
+   */
+  fusion?: "rrf" | "vector-primary";
 }
 
 // ─── Paths ───────────────────────────────────────────────────────────
@@ -225,6 +242,7 @@ export function loadConfig(cwd?: string): Config | null {
     sync: syncCfg,
     primer: file.primer,
     embedder: file.embedder,
+    fusion: file.fusion === "vector-primary" ? "vector-primary" : "rrf",
   };
 }
 

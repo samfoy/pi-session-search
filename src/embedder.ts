@@ -174,10 +174,13 @@ class OpenAICompatibleEmbedder implements Embedder {
       }
 
       const json = (await res.json()) as {
-        data: { embedding: number[]; index: number }[];
+        data: { embedding: number[]; index?: number }[];
       };
-      for (const item of json.data) {
-        results[i + item.index] = item.embedding;
+      for (let k = 0; k < json.data.length; k++) {
+        const item = json.data[k];
+        // Some providers (e.g. Gemini) omit `index` when it is 0
+        // (protobuf default-value omission). Fall back to loop position.
+        results[i + (item.index ?? k)] = item.embedding;
       }
     }
     return results;
