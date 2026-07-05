@@ -1,16 +1,43 @@
 import { readFileSync } from "node:fs";
 
 /**
+ * Default cap on rendered assistant text per message. Verbatim assistant
+ * prose is rarely what the calling agent needs (facts survive truncation),
+ * and large blocks of it are hazardous: Anthropic's API classifier can
+ * hard-block a request that contains tens of KB of model output as a
+ * ToS violation ("duplicating model outputs"), permanently poisoning the
+ * calling session. Tool results and compactions were already truncated;
+ * assistant text was the only uncapped entry type.
+ */
+export const DEFAULT_MAX_ASSISTANT_CHARS = 500;
+
+/** Default cap on total rendered output per call. */
+export const DEFAULT_MAX_OUTPUT_CHARS = 10_000;
+
+/**
  * Read a session JSONL file and format it as a readable conversation.
  * Supports offset/limit for pagination of large sessions.
+ *
+ * Output is size-bounded by default: assistant text is truncated per
+ * message (`maxAssistantChars`) and the whole call stops at an entry
+ * boundary once `maxOutputChars` is reached, emitting an exact resume
+ * offset. Pass `Infinity` for either option to disable.
  */
 export function readSessionConversation(
   file: string,
-  options?: { offset?: number; limit?: number; includeTools?: boolean }
+  options?: {
+    offset?: number;
+    limit?: number;
+    includeTools?: boolean;
+    maxAssistantChars?: number;
+    maxOutputChars?: number;
+  }
 ): string {
   const offset = options?.offset ?? 0;
   const limit = options?.limit ?? 50;
   const includeTools = options?.includeTools ?? false;
+  const maxAssistantChars = options?.maxAssistantChars ?? DEFAULT_MAX_ASSISTANT_CHARS;
+  const maxOutputChars = options?.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
 
   let raw: string;
   try {
@@ -68,81 +95,112 @@ export function readSessionConversation(
     output.push("---");
   }
 
+  let used = 0;
+  let shown = 0;
   for (const entry of page) {
-    const ts = entry.timestamp
-      ? new Date(entry.timestamp).toLocaleString()
-      : "";
-
-    switch (entry.type) {
-      case "message": {
-        const msg = entry.message;
-        if (msg.role === "user") {
-          const text = extractText(msg.content);
-          output.push(`\n**User** (${ts}):\n${text}`);
-        } else if (msg.role === "assistant") {
-          const text = extractAssistantText(msg.content);
-          const model = msg.model ? ` [${msg.provider}/${msg.model}]` : "";
-          output.push(`\n**Assistant**${model} (${ts}):\n${text}`);
-
-          // Show tool calls as summaries
-          if (Array.isArray(msg.content)) {
-            const calls = msg.content.filter(
-              (b: any) => b.type === "toolCall"
-            );
-            if (calls.length > 0) {
-              const callList = calls
-                .map(
-                  (c: any) =>
-                    `  → ${c.name}(${summarizeArgs(c.arguments)})`
-                )
-                .join("\n");
-              output.push(callList);
-            }
-          }
-        } else if (msg.role === "toolResult" && includeTools) {
-          const text = extractText(msg.content);
-          const truncated =
-            text.length > 500 ? text.slice(0, 500) + "…" : text;
-          const err = msg.isError ? " ❌" : "";
-          output.push(
-            `\n  **${msg.toolName}** result${err} (${ts}):\n  ${truncated}`
-          );
-        }
-        break;
-      }
-
-      case "compaction":
-        output.push(
-          `\n--- Compaction (${ts}) ---\n${entry.summary?.slice(0, 1000) ?? "(no summary)"}`
-        );
-        break;
-
-      case "branch_summary":
-        output.push(
-          `\n--- Branch Summary (${ts}) ---\n${entry.summary?.slice(0, 500) ?? "(no summary)"}`
-        );
-        break;
-
-      case "model_change":
-        output.push(
-          `\n*Model changed to ${entry.provider}/${entry.modelId}* (${ts})`
-        );
-        break;
-
-      case "session_info":
-        output.push(`\n*Session renamed to: ${entry.name}* (${ts})`);
-        break;
+    let chunk = renderEntry(entry, { includeTools, maxAssistantChars });
+    if (!chunk) {
+      shown++;
+      continue;
     }
+
+    if (used + chunk.length > maxOutputChars) {
+      if (shown === 0) {
+        // A single oversized entry must still make progress.
+        chunk = chunk.slice(0, maxOutputChars) + "… [entry truncated to fit output cap]";
+        output.push(chunk);
+        shown++;
+      }
+      break;
+    }
+
+    output.push(chunk);
+    used += chunk.length;
+    shown++;
   }
 
   // Pagination hint
-  if (offset + limit < total) {
+  if (shown < page.length) {
     output.push(
-      `\n--- ${total - offset - limit} more entries. Use offset=${offset + limit} to continue. ---`
+      `\n--- Output cap reached: showing ${shown} of ${total} entries. Use offset=${offset + shown} to continue. ---`
+    );
+  } else if (offset + shown < total) {
+    output.push(
+      `\n--- ${total - offset - shown} more entries. Use offset=${offset + shown} to continue. ---`
     );
   }
 
   return output.join("\n");
+}
+
+function renderEntry(
+  entry: any,
+  opts: { includeTools: boolean; maxAssistantChars: number }
+): string | null {
+  const ts = entry.timestamp
+    ? new Date(entry.timestamp).toLocaleString()
+    : "";
+
+  switch (entry.type) {
+    case "message": {
+      const msg = entry.message;
+      if (msg.role === "user") {
+        const text = extractText(msg.content);
+        return `\n**User** (${ts}):\n${text}`;
+      }
+      if (msg.role === "assistant") {
+        const full = extractAssistantText(msg.content);
+        const text =
+          full.length > opts.maxAssistantChars
+            ? full.slice(0, opts.maxAssistantChars) +
+              `… [+${full.length - opts.maxAssistantChars} chars, verbatim=true for full text]`
+            : full;
+        const model = msg.model ? ` [${msg.provider}/${msg.model}]` : "";
+        const parts = [`\n**Assistant**${model} (${ts}):\n${text}`];
+
+        // Show tool calls as summaries
+        if (Array.isArray(msg.content)) {
+          const calls = msg.content.filter(
+            (b: any) => b.type === "toolCall"
+          );
+          if (calls.length > 0) {
+            parts.push(
+              calls
+                .map(
+                  (c: any) =>
+                    `  → ${c.name}(${summarizeArgs(c.arguments)})`
+                )
+                .join("\n")
+            );
+          }
+        }
+        return parts.join("\n");
+      }
+      if (msg.role === "toolResult" && opts.includeTools) {
+        const text = extractText(msg.content);
+        const truncated =
+          text.length > 500 ? text.slice(0, 500) + "…" : text;
+        const err = msg.isError ? " ❌" : "";
+        return `\n  **${msg.toolName}** result${err} (${ts}):\n  ${truncated}`;
+      }
+      return null;
+    }
+
+    case "compaction":
+      return `\n--- Compaction (${ts}) ---\n${entry.summary?.slice(0, 1000) ?? "(no summary)"}`;
+
+    case "branch_summary":
+      return `\n--- Branch Summary (${ts}) ---\n${entry.summary?.slice(0, 500) ?? "(no summary)"}`;
+
+    case "model_change":
+      return `\n*Model changed to ${entry.provider}/${entry.modelId}* (${ts})`;
+
+    case "session_info":
+      return `\n*Session renamed to: ${entry.name}* (${ts})`;
+
+    default:
+      return null;
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────

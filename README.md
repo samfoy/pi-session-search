@@ -129,7 +129,13 @@ session_list(archived=true, limit=20)
 ```
 session_read(session="<file-path-or-uuid>")
 session_read(session="<id>", offset=50, limit=50)
+session_read(session="<id>", verbatim=true)   # disable truncation + output cap
 ```
+
+By default assistant text is truncated to 500 chars per message and the total
+output is capped at 10KB (the read stops at an entry boundary and reports the
+exact `offset` to resume from). This keeps results compact and avoids feeding
+large verbatim model transcripts back into the calling model.
 
 ## Commands
 

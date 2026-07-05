@@ -774,9 +774,9 @@ export default function (pi: ExtensionAPI) {
     name: "session_read",
     label: "Session Read",
     description:
-      "Read the full conversation from a past pi session. Provide the session file path or session ID. Supports pagination for large sessions.",
+      "Read the conversation from a past pi session. Provide the session file path or session ID. Supports pagination for large sessions. Assistant text is truncated and total output is capped by default; set verbatim=true only when full text is required.",
     promptSnippet:
-      "Read the full conversation from a specific past pi session by file path or ID.",
+      "Read the conversation from a specific past pi session by file path or ID. Output is size-capped by default; prefer paging with offset/limit over verbatim=true.",
     parameters: Type.Object({
       session: Type.String({
         description: "Session file path (from session_search/session_list results) or session UUID",
@@ -794,6 +794,12 @@ export default function (pi: ExtensionAPI) {
       include_tools: Type.Optional(
         Type.Boolean({
           description: "Include tool results in output (default false, verbose)",
+        })
+      ),
+      verbatim: Type.Optional(
+        Type.Boolean({
+          description:
+            "Disable assistant-text truncation and the output size cap (default false). Prefer paging with offset/limit.",
         })
       ),
     }),
@@ -850,10 +856,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       const limit = Math.min(params.limit ?? 50, 100);
+      const verbatim = params.verbatim ?? false;
       const output = readSessionConversation(filePath, {
         offset: params.offset ?? 0,
         limit,
         includeTools: params.include_tools ?? false,
+        ...(verbatim
+          ? { maxAssistantChars: Infinity, maxOutputChars: Infinity }
+          : {}),
       });
 
       return {
