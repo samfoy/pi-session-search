@@ -6,6 +6,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { subscribe, unsubscribe } from "node:diagnostics_channel";
 import { join } from "node:path";
 import extension from "../index";
 import { createFakeHost, untilWarm, writeSession } from "./helpers/fake-pi";
@@ -39,6 +40,11 @@ function bigSessionLines(): string[] {
 describe("startup indexing (worker thread)", () => {
   it("keeps the main thread responsive while the initial sync runs", { timeout: 30_000 }, async () => {
     const host = createFakeHost(ROOT, extension);
+    // Without a worker the index silently runs in-process (the fallback), so
+    // count the threads the extension actually starts.
+    let workersStarted = 0;
+    const onWorker = () => void workersStarted++;
+    subscribe("worker_threads", onWorker);
     const maxStallLimitMs = 100;
     let maxStall = 0;
     let last = performance.now();
@@ -66,12 +72,17 @@ describe("startup indexing (worker thread)", () => {
       assert.match(big, /ID: smoke-big/);
       assert.doesNotMatch(big, /index warming/);
 
+      // The sync can finish through microtasks before the ticker runs again;
+      // give it a turn so a stall at the very end is still measured.
+      await new Promise((r) => setTimeout(r, 20));
       assert.ok(
         maxStall < maxStallLimitMs,
         `main thread stalled ${maxStall.toFixed(0)}ms during startup indexing (limit ${maxStallLimitMs}ms)`,
       );
+      assert.equal(workersStarted, 1, "the index runs on one worker thread");
       assert.deepEqual(host.notes.filter((n) => /fail|error|exited/i.test(n)), []);
     } finally {
+      unsubscribe("worker_threads", onWorker);
       clearInterval(ticker);
       await host.shutdown();
       host.cleanup();
