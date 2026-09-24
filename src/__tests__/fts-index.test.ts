@@ -1,6 +1,7 @@
 /**
  * FtsSessionIndex write-path integrity: one row per session id when two
- * indexers share a DB (pi-conductor starts child sessions together).
+ * indexers share a DB (pi-conductor starts child sessions together), and a
+ * failed sync must not leave a transaction open for the next one.
  */
 import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -88,6 +89,27 @@ describe("FtsSessionIndex write integrity", () => {
       assert.deepEqual([...rowsPerId()], [["s0", 1], ["s1", 1], ["s2", 1]]);
       assert.notEqual(idx.get("s0")?.summary, "older copy");
       assert.equal(idx.get("s1")?.summary, "newer copy");
+    } finally {
+      idx.close();
+    }
+  });
+
+  it("a failure mid-chunk rolls back, and the next sync succeeds", async () => {
+    writeSessions(30);
+    const idx = openIndex();
+    await idx.load();
+    try {
+      // "Indexed 25/30..." is reported inside the chunk's open transaction.
+      await assert.rejects(
+        idx.sync((msg) => {
+          if (msg.startsWith("Indexed ")) throw new Error("injected mid-chunk failure");
+        }),
+        /injected mid-chunk failure/,
+      );
+
+      await idx.sync();
+      assert.equal(idx.size(), 30);
+      assert.ok([...rowsPerId().values()].every((n) => n === 1), "one row per id");
     } finally {
       idx.close();
     }

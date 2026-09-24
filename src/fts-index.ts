@@ -105,6 +105,19 @@ export class FtsSessionIndex {
     onProgress?: (msg: string) => void,
     _onError?: (msg: string) => void,
   ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
+    try {
+      return await this.applyChanges(onProgress);
+    } catch (err) {
+      // Roll back the failed chunk: left open, it would make every later
+      // sync's BEGIN fail. Chunks committed before it stay indexed.
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  private async applyChanges(
+    onProgress?: (msg: string) => void,
+  ): Promise<{ added: number; updated: number; removed: number; moved: number }> {
     const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
 
     let added = 0, updated = 0, removed = 0, moved = 0;

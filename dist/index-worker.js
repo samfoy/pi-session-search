@@ -569,6 +569,14 @@ var FtsSessionIndex = class {
     return Number(row?.n ?? 0);
   }
   async sync(onProgress, _onError) {
+    try {
+      return await this.applyChanges(onProgress);
+    } catch (err) {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+  async applyChanges(onProgress) {
     const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
     let added = 0, updated = 0, removed = 0, moved = 0;
     const pause = createYielder();
