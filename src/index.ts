@@ -9,14 +9,39 @@ import {
   DEFAULT_INITIAL_DELAY_MS,
 } from "./config";
 import type { Config } from "./config";
-import { createEmbedder } from "./embedder";
-import { SessionIndex } from "./session-index";
-import { FtsSessionIndex } from "./fts-index";
+import { createIndexService, spawnIndexWorker } from "./index-service";
+import type { IndexOptions, IndexService, SyncResult } from "./index-service";
 import { readSessionConversation } from "./reader";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { truncate, pathToSlug, formatRelativeDate } from "./utils";
 
-type AnyIndex = SessionIndex | FtsSessionIndex;
+/**
+ * Bundled worker entry. Resolves the same from src/index.ts (pi-total-recall
+ * loads the TypeScript source) and dist/index.js, since both sit one level
+ * below the package root.
+ */
+const INDEX_WORKER_FILE = fileURLToPath(new URL("../dist/index-worker.js", import.meta.url));
+
+/** How long session_start waits for the primer before letting pi continue. */
+const PRIMER_WAIT_MS = 1000;
+
+let useIndexWorker = true;
+
+/** Test-only: run the index in-process instead of on a worker thread. */
+export function _setIndexWorkerEnabled(enabled: boolean): void {
+  useIndexWorker = enabled;
+}
+
+/**
+ * Index lifecycle as the tools see it. "warming" means the persisted index is
+ * loaded and answering, but the initial sync has not finished yet.
+ */
+type IndexState = "off" | "loading" | "warming" | "ready" | "failed";
+
+const WARMING_NOTE =
+  "Note: session index warming (initial sync still running), so results may be incomplete.";
 
 /** Build a text tool result; one details type keeps every return path assignable. */
 function textResult(text: string, details: Record<string, unknown> = {}) {
@@ -83,7 +108,9 @@ export function isChildProcess(): boolean {
 }
 
 export default function (pi: ExtensionAPI) {
-  let sessionIndex: AnyIndex | null = null;
+  let sessionIndex: IndexService | null = null;
+  let indexState: IndexState = "off";
+  let indexError = "";
   let currentConfig: Config | null = null;
   let syncTimer: ReturnType<typeof setInterval> | null = null;
   let sessionCwd: string | undefined;
@@ -116,6 +143,18 @@ export default function (pi: ExtensionAPI) {
   // Resolved from config at session_start; -1 means auto-sync disabled.
   let effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
 
+  /**
+   * The index when it can answer (possibly while warming), or the text a tool
+   * should return instead.
+   */
+  function usableIndex(): IndexService | string {
+    if (indexState === "failed") return `Session index unavailable: ${indexError}`;
+    if (!sessionIndex || indexState === "off" || indexState === "loading") {
+      return "Session index warming (loading the saved index). Try again in a moment.";
+    }
+    return sessionIndex;
+  }
+
   // ------------------------------------------------------------------
   // Lifecycle
   // ------------------------------------------------------------------
@@ -134,11 +173,10 @@ export default function (pi: ExtensionAPI) {
   // /resume and re-opens don't double-inject.
   // ------------------------------------------------------------------
 
-  function injectPrimer(ctx: {
-    sessionManager: { getEntries: () => SessionEntry[] };
-  }): void {
-    if (!sessionIndex || sessionIndex.size() === 0) return;
-
+  async function injectPrimer(
+    index: IndexService,
+    ctx: { sessionManager: { getEntries: () => SessionEntry[] } },
+  ): Promise<void> {
     try {
       const alreadyInjected = ctx.sessionManager
         .getEntries()
@@ -151,11 +189,11 @@ export default function (pi: ExtensionAPI) {
       const cwd = sessionCwd || "";
       const projectSlug = cwd ? pathToSlug(cwd) : undefined;
 
-      let sessions = sessionIndex.list({ project: projectSlug, limit: 5 });
+      let sessions = await index.list({ project: projectSlug, limit: 5 });
       if (sessions.length === 0 && projectSlug) {
-        sessions = sessionIndex.list({ limit: 5 });
+        sessions = await index.list({ limit: 5 });
       }
-      if (sessions.length === 0) return;
+      if (sessions.length === 0 || shuttingDown) return;
 
       const lines = sessions.map((s) => {
         const name = s.name || truncate(s.firstUserMessage, 80);
@@ -170,12 +208,17 @@ export default function (pi: ExtensionAPI) {
       const primer = `## Recent Sessions (this project)\n${lines.join("\n")}\n`;
       const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
 
-      pi.sendMessage({
-        customType: "pi-session-search-primer",
-        content: trimmed,
-        display: false,
-        details: { sessionCount: sessions.length },
-      });
+      // triggerTurn: false — if the primer is late and a turn is already
+      // streaming, pi appends it after that turn instead of steering it.
+      pi.sendMessage(
+        {
+          customType: "pi-session-search-primer",
+          content: trimmed,
+          display: false,
+          details: { sessionCount: sessions.length },
+        },
+        { triggerTurn: false },
+      );
     } catch {
       // Primer is nice-to-have; never break startup over it.
     }
@@ -204,43 +247,75 @@ export default function (pi: ExtensionAPI) {
     }
 
     // FTS5 works out of the box with no config; embeddings are optional.
-    void startIndex(currentConfig, ctx, syncAction, initialAction);
+    // The index loads on a worker thread, so waiting here for the primer (so
+    // it precedes the first prompt, e.g. with `pi -p`) never blocks pi's
+    // event loop; the cap bounds how long startup waits on it.
+    const primerDone = startIndex(currentConfig, ctx, syncAction, initialAction);
+    await Promise.race([
+      primerDone,
+      new Promise<void>((r) => setTimeout(r, PRIMER_WAIT_MS).unref()),
+    ]);
   });
 
   function notifySyncError(ctx: any): (msg: string) => void {
     return (msg: string) => ctx.ui.notify(`session-search: ${msg}`, "warning");
   }
 
+  function formatChanges(r: SyncResult, movedLabel = " moved"): string {
+    const parts: string[] = [];
+    if (r.added) parts.push(`+${r.added}`);
+    if (r.updated) parts.push(`~${r.updated}`);
+    if (r.removed) parts.push(`-${r.removed}`);
+    if (r.moved) parts.push(`↗${r.moved}${movedLabel}`);
+    return parts.join(" ");
+  }
+
+  function openIndex(options: IndexOptions, ctx: any): IndexService {
+    if (!useIndexWorker || !existsSync(INDEX_WORKER_FILE)) return createIndexService(options);
+    return spawnIndexWorker(INDEX_WORKER_FILE, options, (err) => {
+      indexState = "failed";
+      indexError = err.message;
+      if (syncTimer) clearInterval(syncTimer);
+      syncTimer = null;
+      if (!shuttingDown) ctx.ui.notify(`session-search: ${err.message}`, "error");
+    });
+  }
+
+  /**
+   * Open and load the index, inject the primer, then schedule syncs.
+   * Resolves once the primer step is done; syncs continue in the background.
+   */
   async function startIndex(
     config: Config | null,
     ctx: any,
     syncAction?: ReturnType<typeof resolveSyncAction>,
     initialAction?: ReturnType<typeof resolveInitialSyncAction>,
-  ) {
+  ): Promise<void> {
     try {
-      if (config?.embedder) {
-        const embedder = createEmbedder(config.embedder);
-        sessionIndex = new SessionIndex(
-          embedder,
-          getIndexDir(sessionCwd),
-          config.extraSessionDirs,
-          config.extraArchiveDirs,
-          config.sessionDir,
-          config.archiveDir,
-          config.fusion,
-        );
-      } else {
-        sessionIndex = new FtsSessionIndex(
-          getIndexDir(sessionCwd),
-          config?.extraSessionDirs ?? [],
-          config?.extraArchiveDirs ?? [],
-          config?.sessionDir,
-          config?.archiveDir,
-        );
-      }
+      indexState = "loading";
+      const index = openIndex(
+        {
+          indexDir: getIndexDir(sessionCwd),
+          extraSessionDirs: config?.extraSessionDirs ?? [],
+          extraArchiveDirs: config?.extraArchiveDirs ?? [],
+          sessionDir: config?.sessionDir,
+          archiveDir: config?.archiveDir,
+          embedder: config?.embedder,
+          fusion: config?.fusion,
+        },
+        ctx,
+      );
+      sessionIndex = index;
 
-      // Load persisted index from disk (searches work immediately; runs v2→v3 migration)
-      await sessionIndex.load();
+      // In-process fallback: yield first so the synchronous load runs after
+      // session_start's own turn rather than inside it.
+      await new Promise<void>((r) => setImmediate(r));
+      if (shuttingDown) return;
+
+      // Load persisted index (searches work immediately; runs v2→v3 migration)
+      await index.load();
+      if (shuttingDown) return;
+      indexState = "warming";
 
       // Inject the "Recent Sessions" primer as a custom message BEFORE any
       // user message arrives. Matches pi-knowledge-search's pattern and
@@ -251,133 +326,124 @@ export default function (pi: ExtensionAPI) {
       if (config?.primer?.enabled === false) {
         ctx.ui.notify("session-search: primer disabled via config", "info");
       } else {
-        injectPrimer(ctx);
+        await injectPrimer(index, ctx);
       }
+      if (shuttingDown) return;
 
-      // Resolve initial sync action (skip/delay/immediate)
-      const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
-      if (initAction.skip) {
-        ctx.ui.notify(
-          "session-search: initial sync skipped (set sync.initialDelay >= 0 to enable)",
-          "info",
-        );
-      } else if (initAction.fallback) {
-        ctx.ui.notify(
-          "session-search: invalid sync.initialDelay, falling back to immediate",
-          "warning",
-        );
+      scheduleSyncs(index, ctx, syncAction, initialAction);
+    } catch (err: any) {
+      // Failed init (e.g. FTS5 unavailable on an old Node 22) — drop the broken
+      // handle so tool calls report the cause instead of a half-initialized
+      // index ("no such table: sessions" or similar).
+      if (indexState !== "failed") {
+        indexState = "failed";
+        indexError = err.message;
+        if (!shuttingDown) ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
       }
+      void sessionIndex?.close().catch(() => {});
+      sessionIndex = null;
+    }
+  }
 
-      // Fire-and-forget: run initial sync in the background so startIndex
-      // returns immediately and doesn't block pi's startup.
-      if (!initAction.skip) {
-        const SYNC_TIMEOUT_MS = 600_000;
-        const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
-        const runSync = () =>
-          Promise.race([
-            sessionIndex!.sync(
-              (msg) => ctx.ui.setStatus("session-search", msg),
-              notifySyncError(ctx),
-            ),
-            new Promise<null>((resolve) =>
-              scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS),
-            ),
-          ]);
+  function scheduleSyncs(
+    index: IndexService,
+    ctx: any,
+    syncAction?: ReturnType<typeof resolveSyncAction>,
+    initialAction?: ReturnType<typeof resolveInitialSyncAction>,
+  ): void {
+    // Resolve initial sync action (skip/delay/immediate)
+    const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
+    if (initAction.skip) {
+      indexState = "ready";
+      ctx.ui.notify(
+        "session-search: initial sync skipped (set sync.initialDelay >= 0 to enable)",
+        "info",
+      );
+    } else if (initAction.fallback) {
+      ctx.ui.notify(
+        "session-search: invalid sync.initialDelay, falling back to immediate",
+        "warning",
+      );
+    }
 
-        const handleSyncResult = (syncResult: Awaited<ReturnType<typeof runSync>>) => {
+    // The initial sync runs on the index worker; the tools answer from the
+    // saved index (with a warming note) until it finishes.
+    if (!initAction.skip) {
+      const SYNC_TIMEOUT_MS = 600_000;
+      const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
+      const runSync = () =>
+        Promise.race([
+          index.sync({
+            onProgress: (msg) => ctx.ui.setStatus("session-search", msg),
+            onError: notifySyncError(ctx),
+          }),
+          new Promise<null>((resolve) =>
+            scheduleTimer(() => resolve(null), SYNC_TIMEOUT_MS),
+          ),
+        ]);
+
+      const initialSync = async () => {
+        try {
+          const syncResult = await runSync();
           if (shuttingDown) return;
           if (syncResult === null) {
             ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
             ctx.ui.setStatus("session-search", "");
           } else {
-            const { added, updated, removed, moved } = syncResult;
-            const changes = added + updated + removed + moved;
-            if (changes > 0) {
-              const parts: string[] = [];
-              if (added) parts.push(`+${added}`);
-              if (updated) parts.push(`~${updated}`);
-              if (removed) parts.push(`-${removed}`);
-              if (moved) parts.push(`↗${moved} moved`);
+            const changes = formatChanges(syncResult);
+            if (changes) {
               ctx.ui.setStatus(
                 "session-search",
-                `Sessions: ${parts.join(" ")} (${sessionIndex?.size() ?? 0} total)`,
+                `Sessions: ${changes} (${await index.size()} total)`,
               );
               scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
             }
           }
-        };
-
-        if (delayMs > 0) {
-          scheduleTimer(async () => {
-            try {
-              handleSyncResult(await runSync());
-            } catch (err: any) {
-              if (shuttingDown) return;
-              ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-              ctx.ui.setStatus("session-search", "");
-            }
-          }, delayMs);
-        } else {
-          // Wrap in setImmediate so the sync chain runs in the next macrotask
-          // — after session_start's microtask drain, before_agent_start, and
-          // the first outbound model HTTP request. Combined with the
-          // setImmediate yield at the top of sync() itself, this keeps the
-          // initial sync entirely off the TTFT critical path even if a
-          // future change re-introduces synchronous CPU work in sync().
-          setImmediate(() => {
-            runSync()
-              .then(handleSyncResult)
-              .catch((err: any) => {
-                if (shuttingDown) return;
-                ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-                ctx.ui.setStatus("session-search", "");
-              });
-          });
+        } catch (err: any) {
+          if (shuttingDown) return;
+          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+          ctx.ui.setStatus("session-search", "");
+        } finally {
+          if (indexState === "warming") indexState = "ready";
         }
-      }
+      };
 
-      // Periodic background sync to pick up new/changed sessions
-      const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);
-      if (action.disabled) {
-        ctx.ui.notify("session-search: auto-sync disabled (set sync.interval > 0 to re-enable)", "info");
-      } else if (action.fallback) {
-        ctx.ui.notify(
-          `session-search: invalid sync.interval, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
-          "warning",
-        );
-        effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
-      }
+      // setImmediate: with the in-process fallback, the sync's synchronous
+      // prefix (directory walk) must not run inside session_start's turn.
+      if (delayMs > 0) scheduleTimer(() => void initialSync(), delayMs);
+      else setImmediate(() => void initialSync());
+    }
 
-      if (!action.disabled && effectiveSyncIntervalMs > 0) {
-        syncTimer = setInterval(async () => {
-          if (!sessionIndex || shuttingDown) return;
-          try {
-            const result = await sessionIndex.sync();
-            if (shuttingDown) return;
-            const changes = result.added + result.updated + result.removed + result.moved;
-            if (changes > 0) {
-              const parts: string[] = [];
-              if (result.added) parts.push(`+${result.added}`);
-              if (result.updated) parts.push(`~${result.updated}`);
-              if (result.removed) parts.push(`-${result.removed}`);
-              if (result.moved) parts.push(`↗${result.moved} moved`);
-              ctx.ui.setStatus(
-                "session-search",
-                `Sessions synced: ${parts.join(" ")} (${sessionIndex.size()} total)`
-              );
-              scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
-            }
-          } catch {
-            // Silent — don't spam on background sync failures
+    // Periodic background sync to pick up new/changed sessions
+    const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);
+    if (action.disabled) {
+      ctx.ui.notify("session-search: auto-sync disabled (set sync.interval > 0 to re-enable)", "info");
+    } else if (action.fallback) {
+      ctx.ui.notify(
+        `session-search: invalid sync.interval, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1000}s`,
+        "warning",
+      );
+      effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
+    }
+
+    if (!action.disabled && effectiveSyncIntervalMs > 0) {
+      syncTimer = setInterval(async () => {
+        if (shuttingDown || indexState === "failed") return;
+        try {
+          const result = await index.sync();
+          if (shuttingDown) return;
+          const changes = formatChanges(result);
+          if (changes) {
+            ctx.ui.setStatus(
+              "session-search",
+              `Sessions synced: ${changes} (${await index.size()} total)`,
+            );
+            scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
           }
-        }, effectiveSyncIntervalMs);
-      }
-    } catch (err: any) {
-      // Failed init (e.g. FTS5 unavailable on an old Node 22) — clear the broken
-      // handle so downstream tool calls don't hit a half-initialized index
-      // and surface "no such table: sessions" or similar.
-      sessionIndex = null;
-      ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
+        } catch {
+          // Silent — don't spam on background sync failures
+        }
+      }, effectiveSyncIntervalMs);
     }
   }
 
@@ -391,9 +457,9 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(handle);
     }
     pendingTimers.clear();
-    if (sessionIndex && "close" in sessionIndex) {
-      (sessionIndex as any).close();
-    }
+    const index = sessionIndex;
+    sessionIndex = null;
+    await index?.close().catch(() => {});
   });
 
   // ------------------------------------------------------------------
@@ -551,22 +617,18 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("session-sync", {
     description: "Force an immediate incremental re-sync of session index",
     handler: async (_args, ctx) => {
-      if (!sessionIndex) {
-        ctx.ui.notify("Session index not ready yet.", "warning");
+      const index = usableIndex();
+      if (typeof index === "string") {
+        ctx.ui.notify(index, "warning");
         return;
       }
       try {
-        const r = await sessionIndex.sync(
-          (msg) => ctx.ui.setStatus("session-search", msg),
-          notifySyncError(ctx),
-        );
-        const parts: string[] = [];
-        if (r.added) parts.push(`+${r.added}`);
-        if (r.updated) parts.push(`~${r.updated}`);
-        if (r.removed) parts.push(`-${r.removed}`);
-        if (r.moved) parts.push(`↗${r.moved}`);
+        const r = await index.sync({
+          onProgress: (msg) => ctx.ui.setStatus("session-search", msg),
+          onError: notifySyncError(ctx),
+        });
         ctx.ui.notify(
-          `Synced: ${parts.join(" ") || "no changes"} (${sessionIndex.size()} total)`,
+          `Synced: ${formatChanges(r, "") || "no changes"} (${await index.size()} total)`,
           "info",
         );
         ctx.ui.setStatus("session-search", "");
@@ -583,21 +645,19 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("session-reindex", {
     description: "Force full re-index of all session files",
     handler: async (_args, ctx) => {
-      if (!sessionIndex) {
-        ctx.ui.notify(
-          "Session index not ready yet.",
-          "warning"
-        );
+      const index = usableIndex();
+      if (typeof index === "string") {
+        ctx.ui.notify(index, "warning");
         return;
       }
       ctx.ui.notify("Re-indexing sessions...", "info");
       try {
-        await sessionIndex.rebuild(
-          (msg) => ctx.ui.setStatus("session-search", msg),
-          notifySyncError(ctx),
-        );
+        await index.rebuild({
+          onProgress: (msg) => ctx.ui.setStatus("session-search", msg),
+          onError: notifySyncError(ctx),
+        });
         ctx.ui.notify(
-          `Re-indexed: ${sessionIndex.size()} sessions`,
+          `Re-indexed: ${await index.size()} sessions`,
           "info"
         );
         ctx.ui.setStatus("session-search", "");
@@ -637,22 +697,29 @@ export default function (pi: ExtensionAPI) {
         })
       ),
     }),
-    async execute(_toolCallId, params, signal) {
-      if (!sessionIndex || sessionIndex.size() === 0) {
-        const msg = !sessionIndex
-          ? "Session index not ready yet."
-          : "Session index is empty — it may still be building. Try again in a moment.";
-        return textResult(msg);
-      }
+    async execute(_toolCallId, params) {
+      const index = usableIndex();
+      if (typeof index === "string") return textResult(index);
+      const warming = indexState === "warming";
+      const note = warming ? `${WARMING_NOTE}\n\n` : "";
 
       const limit = Math.min(params.limit ?? 10, 25);
 
       try {
-        const results = await sessionIndex.search(params.query, limit, signal, params.project);
+        const indexSize = await index.size();
+        if (indexSize === 0) {
+          return textResult(
+            warming
+              ? "Session index warming: no sessions indexed yet. Try again in a moment."
+              : "Session index is empty.",
+          );
+        }
+
+        const results = await index.search(params.query, limit, params.project);
 
         if (results.length === 0) {
           const scope = params.project ? ` in project "${params.project}"` : "";
-          return textResult(`No relevant sessions found for: "${params.query}"${scope}`);
+          return textResult(`${note}No relevant sessions found for: "${params.query}"${scope}`);
         }
 
         const home = process.env.HOME || "";
@@ -671,12 +738,13 @@ export default function (pi: ExtensionAPI) {
           .join("\n\n---\n\n");
 
         const scopeNote = params.project ? ` scoped to "${params.project}"` : "";
-        const header = `Found ${results.length} sessions for "${params.query}"${scopeNote} (${sessionIndex.size()} sessions indexed):\n\n`;
+        const header = `${note}Found ${results.length} sessions for "${params.query}"${scopeNote} (${indexSize} sessions indexed):\n\n`;
 
         return textResult(header + output, {
           resultCount: results.length,
-          indexSize: sessionIndex.size(),
+          indexSize,
           project: params.project,
+          warming,
         });
       } catch (err: any) {
         throw new Error(`session-search failed: ${err.message}`);
@@ -717,15 +785,22 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params) {
-      if (!sessionIndex || sessionIndex.size() === 0) {
-        const msg = !sessionIndex
-          ? "Session index not ready yet."
-          : "Session index is empty.";
-        return textResult(msg);
+      const index = usableIndex();
+      if (typeof index === "string") return textResult(index);
+      const warming = indexState === "warming";
+      const note = warming ? `${WARMING_NOTE}\n\n` : "";
+
+      const indexSize = await index.size();
+      if (indexSize === 0) {
+        return textResult(
+          warming
+            ? "Session index warming: no sessions indexed yet. Try again in a moment."
+            : "Session index is empty.",
+        );
       }
 
       const limit = Math.min(params.limit ?? 20, 50);
-      const sessions = sessionIndex.list({
+      const sessions = await index.list({
         project: params.project,
         after: params.after,
         before: params.before,
@@ -734,7 +809,7 @@ export default function (pi: ExtensionAPI) {
       });
 
       if (sessions.length === 0) {
-        return textResult("No sessions match the filters.");
+        return textResult(`${note}No sessions match the filters.`);
       }
 
       const home = process.env.HOME || "";
@@ -752,9 +827,9 @@ export default function (pi: ExtensionAPI) {
         })
         .join("\n\n");
 
-      const header = `${sessions.length} sessions (${sessionIndex.size()} total indexed):\n\n`;
+      const header = `${note}${sessions.length} sessions (${indexSize} total indexed):\n\n`;
 
-      return textResult(header + output, { resultCount: sessions.length });
+      return textResult(header + output, { resultCount: sessions.length, warming });
     },
   });
 
@@ -794,17 +869,16 @@ export default function (pi: ExtensionAPI) {
       let filePath = params.session;
 
       // If it looks like a UUID, try to find it in the index
-      if (
-        sessionIndex &&
-        !filePath.endsWith(".jsonl") &&
-        !filePath.includes("/")
-      ) {
-        const entry = sessionIndex.get(filePath);
+      if (!filePath.endsWith(".jsonl") && !filePath.includes("/")) {
+        const index = usableIndex();
+        if (typeof index === "string") return textResult(index);
+        const entry = await index.get(filePath);
         if (entry) {
           filePath = entry.session.file;
         } else {
+          const note = indexState === "warming" ? `\n\n${WARMING_NOTE}` : "";
           return textResult(
-            `Session not found: "${params.session}". Use session_search or session_list to find the session file path.`,
+            `Session not found: "${params.session}". Use session_search or session_list to find the session file path.${note}`,
           );
         }
       }

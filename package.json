@@ -58,10 +58,11 @@
     "typescript": "^6.0.3"
   },
   "scripts": {
+    "pretest": "npm run build",
     "test": "node --test --import tsx src/**/*.test.ts",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external",
+    "build": "esbuild src/index.ts src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external",
     "check": "tsc --noEmit",
-    "dev": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --watch --packages=external",
+    "dev": "esbuild src/index.ts src/index-worker.ts --bundle --platform=node --format=esm --outdir=dist --sourcemap --packages=external --watch",
     "prepack": "npm run build"
   }
 }

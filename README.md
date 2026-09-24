@@ -9,6 +9,7 @@ Index, summarize, and search past [pi](https://github.com/badlogic/pi-mono) codi
 - **Browse & filter** — List sessions by project, date range, archive status (`session_list`)
 - **Read conversations** — View the full conversation from any past session (`session_read`)
 - **Auto-indexing** — Parses JSONL session files on startup, tracks changes incrementally
+- **Non-blocking startup** — The index loads, syncs, and answers queries on a worker thread, so indexing never freezes pi's UI. Until the first sync finishes, the tools answer from the saved index and say `index warming`
 - **Session primer** — Injects a short list of recent project sessions as a hidden custom message at session start (before any user message — won't override your first question)
 - **Archive support** — Indexes both `~/.pi/agent/sessions/` and `~/.pi/agent/sessions-archive/`
 - **Multiple embedders** — OpenAI, Mistral, AWS Bedrock, local Ollama, or any OpenAI-compatible API
@@ -167,6 +168,7 @@ Tested against a 2,159-session corpus: hybrid surfaces **75% more relevant docum
 
 - Index stored at `~/.pi/session-search/index/`
 - Incremental sync on startup + configurable periodic re-sync (default 5 min)
+- All index work (discovery, parsing, SQLite, embeddings) runs on a worker thread (`dist/index-worker.js`); pi's main thread only exchanges messages with it. If that file is missing, the index runs in-process instead
 - Two separate SQLite DBs: `sessions-fts.db` (pure-FTS mode) and `hybrid-fts.db` (side-car for embedder mode)
 - Switching modes doesn't corrupt state
 

@@ -3,6 +3,23 @@
  */
 import { homedir } from "node:os";
 
+/**
+ * Cooperative yield point for long synchronous loops (index sync). `due()`
+ * turns true once `budgetMs` of work has run since the last yield, so the
+ * loop can finish a unit (e.g. COMMIT) before `yield()` hands the event loop
+ * to queued requests.
+ */
+export function createYielder(budgetMs = 8): { due(): boolean; yield(): Promise<void> } {
+  let last = performance.now();
+  return {
+    due: () => performance.now() - last >= budgetMs,
+    async yield() {
+      await new Promise<void>((r) => setImmediate(r));
+      last = performance.now();
+    },
+  };
+}
+
 /** Truncate a string to `max` characters, appending "…" if truncated. */
 export function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max) + "…";

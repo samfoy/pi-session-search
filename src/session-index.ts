@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ParsedSession } from "./parser";
@@ -6,7 +6,7 @@ import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { Embedder } from "./embedder";
 import { buildContent, toFtsQuery } from "./fts-index";
 import { assertFts5Available } from "./fts5-probe";
-import { truncate, slugToProject, buildSummary } from "./utils";
+import { slugToProject, buildSummary, createYielder } from "./utils";
 
 // ─── FTS side-car (for hybrid search) ────────────────────────────────
 
@@ -103,7 +103,7 @@ export function decodeEmbedding(stored: number[] | string): number[] {
  * These are only needed during embedding generation, not at search/list time.
  * Saves ~17MB across 2000 sessions.
  */
-function stripHeavyFields(session: ParsedSession): ParsedSession {
+export function stripHeavyFields(session: ParsedSession): ParsedSession {
   return {
     ...session,
     userMessages: [],
@@ -189,7 +189,11 @@ export class SessionIndex {
 
   /** Save index to disk. */
   save(): void {
-    writeFileSync(this.indexPath, JSON.stringify(this.data), "utf8");
+    // Write-then-rename so a worker terminated mid-save (pi exiting) can't
+    // leave a truncated index behind.
+    const tmp = `${this.indexPath}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(this.data), "utf8");
+    renameSync(tmp, this.indexPath);
   }
 
   /** Number of indexed sessions. */
@@ -227,6 +231,7 @@ export class SessionIndex {
     let removed = 0;
     let moved = 0;
     let reportedEmbeddingFailure = false;
+    const pause = createYielder();
 
     // ── Phase 1: Build a map of discovered files → session ID ────────
     // We need session IDs to correlate with the index. For files already
@@ -250,6 +255,7 @@ export class SessionIndex {
     }
 
     for (const { file, archived } of discovered) {
+      if (pause.due()) await pause.yield();
       let mtimeMs: number;
       let sizeBytes: number;
       try {
@@ -336,6 +342,7 @@ export class SessionIndex {
       const parsed: { item: (typeof toEmbed)[0]; session: ParsedSession }[] = [];
 
       for (const item of batch) {
+        if (pause.due()) await pause.yield();
         const session = parseSession(item.file, item.archived);
         if (session && session.userMessageCount > 0) {
           parsed.push({ item, session });

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ParsedSession } from "./parser";
 import { discoverSessionFiles, parseSession, readSessionId } from "./parser";
 import type { SearchResult, ListFilters } from "./session-index";
-import { truncate, buildSummary } from "./utils";
+import { buildSummary, createYielder } from "./utils";
 import { assertFts5Available } from "./fts5-probe";
 
 /**
@@ -93,10 +93,12 @@ export class FtsSessionIndex {
     const discovered = discoverSessionFiles(this.extraSessionDirs, this.extraArchiveDirs, this.sessionDir, this.archiveDir);
 
     let added = 0, updated = 0, removed = 0, moved = 0;
+    const pause = createYielder();
 
     // Build idToFile map from disk (preferring newer mtime on dupes)
     const idToFile = new Map<string, { file: string; archived: boolean; mtimeMs: number; sizeBytes: number }>();
     for (const { file, archived } of discovered) {
+      if (pause.due()) await pause.yield();
       let mtimeMs: number;
       let sizeBytes: number;
       try {
@@ -170,9 +172,17 @@ export class FtsSessionIndex {
     `);
     const replaceDel = this.db.prepare("DELETE FROM sessions WHERE id = ?");
 
+    // Commit before each yield so no transaction spans an await: requests
+    // served between chunks never meet an open transaction, and other pi
+    // processes sharing this DB only wait for one chunk's write lock.
     this.db.exec("BEGIN");
     let done = 0;
     for (const item of toIngest) {
+      if (pause.due()) {
+        this.db.exec("COMMIT");
+        await pause.yield();
+        this.db.exec("BEGIN");
+      }
       const session = parseSession(item.file, item.archived);
       if (!session || session.userMessageCount === 0) { done++; continue; }
       const content = buildContent(session);

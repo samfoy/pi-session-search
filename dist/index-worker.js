@@ -1,98 +1,5 @@
-// src/index.ts
-import { Type } from "typebox";
-
-// src/config.ts
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, dirname } from "node:path";
-var DEFAULT_SYNC_INTERVAL_MS = 5 * 60 * 1e3;
-var DEFAULT_INITIAL_DELAY_MS = 0;
-function globalConfigDir() {
-  return join(homedir(), ".pi", "session-search");
-}
-function globalConfigFile() {
-  return join(globalConfigDir(), "config.json");
-}
-function globalIndexDir() {
-  return join(globalConfigDir(), "index");
-}
-function warnUnknownKeys(block, blockName, knownKeys) {
-  if (!block || typeof block !== "object") return;
-  const unknown = Object.keys(block).filter((k) => !knownKeys.includes(k));
-  if (unknown.length === 0) return;
-  console.error(
-    `pi-session-search: ignoring unknown key(s) in settings.json "${blockName}" block: ${unknown.join(", ")} (expected: ${knownKeys.join(", ")})`
-  );
-}
-var PI_SESSION_SEARCH_SETTINGS_KEYS = ["localPath"];
-var PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"];
-function resolveLocalBase(cwd) {
-  if (!cwd) return null;
-  try {
-    const raw = readFileSync(join(cwd, ".pi", "settings.json"), "utf-8");
-    const settings = JSON.parse(raw) ?? {};
-    const ss = settings["pi-session-search"];
-    warnUnknownKeys(ss, "pi-session-search", PI_SESSION_SEARCH_SETTINGS_KEYS);
-    if (ss && typeof ss === "object" && typeof ss.localPath === "string" && ss.localPath) {
-      return ss.localPath;
-    }
-    const tr = settings["pi-total-recall"];
-    warnUnknownKeys(tr, "pi-total-recall", PI_TOTAL_RECALL_KNOWN_KEYS);
-    if (tr && typeof tr === "object" && typeof tr.localPath === "string" && tr.localPath) {
-      return join(tr.localPath, "session-search");
-    }
-  } catch {
-  }
-  return null;
-}
-function getConfigPath(cwd) {
-  const base = resolveLocalBase(cwd);
-  if (base) return join(base, "config.json");
-  return globalConfigFile();
-}
-function getIndexDir(cwd) {
-  const base = resolveLocalBase(cwd);
-  if (base) return join(base, "index");
-  return globalIndexDir();
-}
-function loadConfig(cwd) {
-  const configFile = getConfigPath(cwd);
-  if (!existsSync(configFile)) return null;
-  const raw = readFileSync(configFile, "utf8");
-  let file;
-  try {
-    file = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  const rawInterval = file.sync?.interval;
-  const rawInitialDelay = file.sync?.initialDelay;
-  const rawDisableForChild = file.sync?.disableForChild;
-  let syncCfg;
-  const syncFields = {};
-  if (typeof rawInterval === "number") syncFields.interval = rawInterval;
-  if (typeof rawInitialDelay === "number") syncFields.initialDelay = rawInitialDelay;
-  if (typeof rawDisableForChild === "boolean") syncFields.disableForChild = rawDisableForChild;
-  if (Object.keys(syncFields).length > 0) syncCfg = syncFields;
-  return {
-    extraSessionDirs: file.extraSessionDirs ?? [],
-    extraArchiveDirs: file.extraArchiveDirs ?? [],
-    sessionDir: typeof file.sessionDir === "string" && file.sessionDir ? file.sessionDir : void 0,
-    archiveDir: typeof file.archiveDir === "string" && file.archiveDir ? file.archiveDir : void 0,
-    sync: syncCfg,
-    primer: file.primer,
-    embedder: file.embedder,
-    fusion: file.fusion === "vector-primary" ? "vector-primary" : "rrf"
-  };
-}
-function saveConfig(file, cwd) {
-  const configFile = getConfigPath(cwd);
-  mkdirSync(dirname(configFile), { recursive: true });
-  writeFileSync(configFile, JSON.stringify(file, null, 2), "utf8");
-}
-
-// src/index-service.ts
-import { Worker } from "node:worker_threads";
+// src/index-worker.ts
+import { parentPort, workerData } from "node:worker_threads";
 
 // src/embedder.ts
 var DEFAULTS = {
@@ -309,30 +216,30 @@ var OllamaEmbedder = class {
 
 // src/fts-index.ts
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync2, statSync as statSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { mkdirSync, statSync as statSync2 } from "node:fs";
+import { join as join2 } from "node:path";
 
 // src/parser.ts
-import { readFileSync as readFileSync2, readdirSync, existsSync as existsSync2, openSync, readSync, closeSync } from "node:fs";
-import { join as join2, basename, dirname as dirname2 } from "node:path";
+import { readFileSync, readdirSync, existsSync, openSync, readSync, closeSync } from "node:fs";
+import { join, basename, dirname } from "node:path";
 function getDefaultSessionDir() {
-  return process.env.PI_SESSION_DIR || join2(process.env.HOME || "~", ".pi", "agent", "sessions");
+  return process.env.PI_SESSION_DIR || join(process.env.HOME || "~", ".pi", "agent", "sessions");
 }
 function getDefaultArchiveDir() {
-  return process.env.PI_SESSION_ARCHIVE_DIR || join2(process.env.HOME || "~", ".pi", "agent", "sessions-archive");
+  return process.env.PI_SESSION_ARCHIVE_DIR || join(process.env.HOME || "~", ".pi", "agent", "sessions-archive");
 }
 function discoverSessionFiles(extraSessionDirs = [], extraArchiveDirs = [], sessionDir, archiveDir) {
   const sDirs = [sessionDir ?? getDefaultSessionDir(), ...extraSessionDirs];
   const aDirs = [archiveDir ?? getDefaultArchiveDir(), ...extraArchiveDirs];
   const results = [];
   for (const dir of sDirs) {
-    if (!existsSync2(dir)) continue;
+    if (!existsSync(dir)) continue;
     for (const entry of walkJsonl(dir)) {
       results.push({ file: entry, archived: false });
     }
   }
   for (const dir of aDirs) {
-    if (!existsSync2(dir)) continue;
+    if (!existsSync(dir)) continue;
     for (const entry of walkJsonl(dir)) {
       results.push({ file: entry, archived: true });
     }
@@ -343,7 +250,7 @@ function walkJsonl(dir) {
   const files = [];
   try {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const full = join2(dir, entry.name);
+      const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         files.push(...walkJsonl(full));
       } else if (entry.name.endsWith(".jsonl") && entry.name !== "pins.json" && entry.name !== "active-sessions.json") {
@@ -378,7 +285,7 @@ function cleanLine(line) {
 function parseSession(file, archived) {
   let raw;
   try {
-    raw = readFileSync2(file, "utf8");
+    raw = readFileSync(file, "utf8");
   } catch {
     return null;
   }
@@ -400,7 +307,7 @@ function parseSession(file, archived) {
     }
   }
   if (!header) return null;
-  const parentDir = basename(dirname2(file));
+  const parentDir = basename(dirname(file));
   const projectSlug = parentDir.startsWith("--") ? parentDir : "unknown";
   const models = /* @__PURE__ */ new Set();
   const toolCallMap = /* @__PURE__ */ new Map();
@@ -521,7 +428,6 @@ function extractPathFromToolResult(_entry, msg) {
 }
 
 // src/utils.ts
-import { homedir as homedir2 } from "node:os";
 function createYielder(budgetMs = 8) {
   let last = performance.now();
   return {
@@ -538,30 +444,6 @@ function truncate2(s, max) {
 function slugToProject(slug) {
   if (!slug.startsWith("--") || !slug.endsWith("--")) return slug;
   return slug.slice(2, -2).replace(/-/g, "/");
-}
-function formatRelativeDate(iso) {
-  const then = new Date(iso).getTime();
-  const now = Date.now();
-  const diffMs = now - then;
-  if (diffMs < 0) return "just now";
-  const minutes = Math.floor(diffMs / 6e4);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days === 1) return "1d ago";
-  if (days < 7) return `${days}d ago`;
-  if (days < 14) return "last week";
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  return months <= 1 ? "last month" : `${months}mo ago`;
-}
-function pathToSlug(cwd) {
-  const home = homedir2();
-  const rel = cwd.startsWith(home) ? cwd.slice(home.length + 1) : cwd;
-  return rel.replace(/\//g, "-");
 }
 function buildSummary(s) {
   const lines = [];
@@ -635,8 +517,8 @@ var FtsSessionIndex = class {
     this.extraArchiveDirs = extraArchiveDirs;
     this.sessionDir = sessionDir;
     this.archiveDir = archiveDir;
-    mkdirSync2(indexDir, { recursive: true });
-    this.dbPath = join3(indexDir, "sessions-fts.db");
+    mkdirSync(indexDir, { recursive: true });
+    this.dbPath = join2(indexDir, "sessions-fts.db");
   }
   async load() {
     assertFts5Available();
@@ -864,14 +746,14 @@ function toFtsQuery(q) {
 }
 
 // src/session-index.ts
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, existsSync as existsSync3, mkdirSync as mkdirSync3, renameSync, statSync as statSync3 } from "node:fs";
-import { join as join4 } from "node:path";
+import { readFileSync as readFileSync2, writeFileSync, existsSync as existsSync2, mkdirSync as mkdirSync2, renameSync, statSync as statSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 var FtsSide = class {
   db;
   constructor(indexDir) {
     assertFts5Available();
-    this.db = new DatabaseSync3(join4(indexDir, "hybrid-fts.db"));
+    this.db = new DatabaseSync3(join3(indexDir, "hybrid-fts.db"));
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec(
       "CREATE VIRTUAL TABLE IF NOT EXISTS s USING fts5(id UNINDEXED, name, content, tokenize='porter unicode61')"
@@ -947,8 +829,8 @@ var SessionIndex = class {
     this.sessionDir = sessionDir;
     this.archiveDir = archiveDir;
     this.fusion = fusion;
-    mkdirSync3(indexDir, { recursive: true });
-    this.indexPath = join4(indexDir, "session-index.json");
+    mkdirSync2(indexDir, { recursive: true });
+    this.indexPath = join3(indexDir, "session-index.json");
     this.fts = new FtsSide(indexDir);
   }
   embedder;
@@ -963,9 +845,9 @@ var SessionIndex = class {
   fts;
   /** Load existing index from disk. */
   async load() {
-    if (!existsSync3(this.indexPath)) return;
+    if (!existsSync2(this.indexPath)) return;
     try {
-      const raw = readFileSync3(this.indexPath, "utf8");
+      const raw = readFileSync2(this.indexPath, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed.version === INDEX_VERSION) {
         this.data = parsed;
@@ -1009,7 +891,7 @@ var SessionIndex = class {
   /** Save index to disk. */
   save() {
     const tmp = `${this.indexPath}.${process.pid}.tmp`;
-    writeFileSync2(tmp, JSON.stringify(this.data), "utf8");
+    writeFileSync(tmp, JSON.stringify(this.data), "utf8");
     renameSync(tmp, this.indexPath);
   }
   /** Number of indexed sessions. */
@@ -1363,889 +1245,34 @@ function createIndexService(options) {
     }
   };
 }
-function spawnIndexWorker(workerFile, options, onCrash) {
-  const worker = new Worker(workerFile, { workerData: options, stdout: true, stderr: true });
-  worker.unref();
-  worker.stdout.resume();
-  let stderrTail = "";
-  worker.stderr.on("data", (chunk) => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-1e3);
-  });
-  let nextId = 1;
-  let dead = null;
-  let closing = false;
-  const pending = /* @__PURE__ */ new Map();
-  const die = (err) => {
-    if (dead) return;
-    dead = err;
-    for (const p of pending.values()) p.reject(err);
-    pending.clear();
-    if (!closing) onCrash(err);
+async function handleWorkerRequest(service2, req, post) {
+  const callbacks = {
+    onProgress: (msg) => post({ id: req.id, type: "progress", msg }),
+    onError: (msg) => post({ id: req.id, type: "notice", msg })
   };
-  worker.on("message", (reply) => {
-    const p = pending.get(reply.id);
-    if (!p) return;
-    if (reply.type === "progress") p.callbacks?.onProgress?.(reply.msg);
-    else if (reply.type === "notice") p.callbacks?.onError?.(reply.msg);
-    else {
-      pending.delete(reply.id);
-      if (reply.type === "result") p.resolve(reply.value);
-      else p.reject(new Error(reply.message));
-    }
-  });
-  worker.on("error", die);
-  worker.on("exit", (code) => {
-    const detail = stderrTail.trim().split("\n").filter(Boolean).pop();
-    die(new Error(`index worker exited with code ${code}${detail ? `: ${detail}` : ""}`));
-  });
-  const call = (op, args = [], callbacks) => new Promise((resolve2, reject) => {
-    if (dead) return reject(dead);
-    const id = nextId++;
-    pending.set(id, { resolve: resolve2, reject, callbacks });
-    worker.postMessage({ id, op, args });
-  });
-  return {
-    load: () => call("load"),
-    sync: (callbacks) => call("sync", [], callbacks),
-    rebuild: (callbacks) => call("rebuild", [], callbacks),
-    search: (query, limit, project) => call("search", [query, limit, project]),
-    list: (filters) => call("list", [filters]),
-    get: (fileOrId) => call("get", [fileOrId]),
-    size: () => call("size"),
-    async close() {
-      closing = true;
-      await worker.terminate();
-    }
-  };
-}
-
-// src/reader.ts
-import { readFileSync as readFileSync4 } from "node:fs";
-function readSessionConversation(file, options) {
-  const offset = options?.offset ?? 0;
-  const limit = options?.limit ?? 50;
-  const includeTools = options?.includeTools ?? false;
-  let raw;
+  const [a, b, c] = req.args;
   try {
-    raw = readFileSync4(file, "utf8");
+    const value = await {
+      load: () => service2.load(),
+      sync: () => service2.sync(callbacks),
+      rebuild: () => service2.rebuild(callbacks),
+      search: () => service2.search(a, b, c),
+      list: () => service2.list(a),
+      get: () => service2.get(a),
+      size: () => service2.size(),
+      close: () => service2.close()
+    }[req.op]();
+    post({ id: req.id, type: "result", value });
   } catch (err) {
-    return `Error reading session: ${err.message}`;
+    post({ id: req.id, type: "failure", message: err?.message ?? String(err) });
   }
-  const lines = raw.trim().split("\n");
-  const entries = [];
-  let header = null;
-  for (const line of lines) {
-    const cleaned = line.replace(/^\uFEFF/, "").trim();
-    if (!cleaned) continue;
-    try {
-      const obj = JSON.parse(cleaned);
-      if (obj.type === "session") {
-        header = obj;
-      } else {
-        entries.push(obj);
-      }
-    } catch {
-    }
-  }
-  const conversationEntries = entries.filter((e) => {
-    if (e.type === "message") {
-      const role = e.message?.role;
-      if (role === "user") return true;
-      if (role === "assistant") return true;
-      if (role === "toolResult" && includeTools) return true;
-      return false;
-    }
-    if (e.type === "compaction") return true;
-    if (e.type === "branch_summary") return true;
-    if (e.type === "session_info") return true;
-    if (e.type === "model_change") return true;
-    return false;
-  });
-  const total = conversationEntries.length;
-  const page = conversationEntries.slice(offset, offset + limit);
-  const output = [];
-  if (header) {
-    output.push(
-      `Session: ${header.id}
-Started: ${header.timestamp}
-CWD: ${header.cwd}`
-    );
-    output.push(`Total entries: ${total} (showing ${offset + 1}-${Math.min(offset + limit, total)})`);
-    output.push("---");
-  }
-  for (const entry of page) {
-    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "";
-    switch (entry.type) {
-      case "message": {
-        const msg = entry.message;
-        if (msg.role === "user") {
-          const text = extractText(msg.content);
-          output.push(`
-**User** (${ts}):
-${text}`);
-        } else if (msg.role === "assistant") {
-          const text = extractAssistantText(msg.content);
-          const model = msg.model ? ` [${msg.provider}/${msg.model}]` : "";
-          output.push(`
-**Assistant**${model} (${ts}):
-${text}`);
-          if (Array.isArray(msg.content)) {
-            const calls = msg.content.filter(
-              (b) => b.type === "toolCall"
-            );
-            if (calls.length > 0) {
-              const callList = calls.map(
-                (c) => `  \u2192 ${c.name}(${summarizeArgs(c.arguments)})`
-              ).join("\n");
-              output.push(callList);
-            }
-          }
-        } else if (msg.role === "toolResult" && includeTools) {
-          const text = extractText(msg.content);
-          const truncated = text.length > 500 ? text.slice(0, 500) + "\u2026" : text;
-          const err = msg.isError ? " \u274C" : "";
-          output.push(
-            `
-  **${msg.toolName}** result${err} (${ts}):
-  ${truncated}`
-          );
-        }
-        break;
-      }
-      case "compaction":
-        output.push(
-          `
---- Compaction (${ts}) ---
-${entry.summary?.slice(0, 1e3) ?? "(no summary)"}`
-        );
-        break;
-      case "branch_summary":
-        output.push(
-          `
---- Branch Summary (${ts}) ---
-${entry.summary?.slice(0, 500) ?? "(no summary)"}`
-        );
-        break;
-      case "model_change":
-        output.push(
-          `
-*Model changed to ${entry.provider}/${entry.modelId}* (${ts})`
-        );
-        break;
-      case "session_info":
-        output.push(`
-*Session renamed to: ${entry.name}* (${ts})`);
-        break;
-    }
-  }
-  if (offset + limit < total) {
-    output.push(
-      `
---- ${total - offset - limit} more entries. Use offset=${offset + limit} to continue. ---`
-    );
-  }
-  return output.join("\n");
-}
-function extractText(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
-  }
-  return "";
-}
-function extractAssistantText(content) {
-  if (!Array.isArray(content)) return String(content ?? "");
-  return content.filter((b) => b.type === "text").map((b) => b.text).join("\n");
-}
-function summarizeArgs(args) {
-  if (!args) return "";
-  const parts = [];
-  for (const [key, val] of Object.entries(args)) {
-    if (typeof val === "string") {
-      parts.push(`${key}="${val.length > 60 ? val.slice(0, 60) + "\u2026" : val}"`);
-    } else {
-      parts.push(`${key}=${JSON.stringify(val)?.slice(0, 40)}`);
-    }
-  }
-  return parts.join(", ");
 }
 
-// src/index.ts
-import { existsSync as existsSync4 } from "node:fs";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-var INDEX_WORKER_FILE = fileURLToPath(new URL("../dist/index-worker.js", import.meta.url));
-var PRIMER_WAIT_MS = 1e3;
-var useIndexWorker = true;
-function _setIndexWorkerEnabled(enabled) {
-  useIndexWorker = enabled;
-}
-var WARMING_NOTE = "Note: session index warming (initial sync still running), so results may be incomplete.";
-function textResult(text, details = {}) {
-  return { content: [{ type: "text", text }], details };
-}
-function resolveSyncAction(rawInterval) {
-  if (rawInterval === void 0)
-    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS };
-  if (rawInterval === -1) return { disabled: true };
-  if (rawInterval <= 0) {
-    return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS, fallback: true };
-  }
-  return { disabled: false, intervalMs: rawInterval };
-}
-function resolveInitialSyncAction(rawDelay) {
-  if (rawDelay === void 0)
-    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS };
-  if (rawDelay === -1) return { skip: true };
-  if (rawDelay < 0) {
-    return { skip: false, delayMs: DEFAULT_INITIAL_DELAY_MS, fallback: true };
-  }
-  return { skip: false, delayMs: rawDelay };
-}
-function isChildProcess() {
-  const depth = Number(process.env.PI_SUBAGENT_DEPTH);
-  if (depth > 0) return true;
-  if (!process.stdin.isTTY) return true;
-  return false;
-}
-function index_default(pi) {
-  let sessionIndex = null;
-  let indexState = "off";
-  let indexError = "";
-  let currentConfig = null;
-  let syncTimer = null;
-  let sessionCwd;
-  const pendingTimers = /* @__PURE__ */ new Set();
-  let shuttingDown = false;
-  function scheduleTimer(fn, ms) {
-    const handle = setTimeout(() => {
-      pendingTimers.delete(handle);
-      if (shuttingDown) return;
-      try {
-        fn();
-      } catch {
-      }
-    }, ms);
-    pendingTimers.add(handle);
-    return handle;
-  }
-  let effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
-  function usableIndex() {
-    if (indexState === "failed") return `Session index unavailable: ${indexError}`;
-    if (!sessionIndex || indexState === "off" || indexState === "loading") {
-      return "Session index warming (loading the saved index). Try again in a moment.";
-    }
-    return sessionIndex;
-  }
-  async function injectPrimer(index, ctx) {
-    try {
-      const alreadyInjected = ctx.sessionManager.getEntries().some(
-        (e) => e.type === "custom_message" && e.customType === "pi-session-search-primer"
-      );
-      if (alreadyInjected) return;
-      const cwd = sessionCwd || "";
-      const projectSlug = cwd ? pathToSlug(cwd) : void 0;
-      let sessions = await index.list({ project: projectSlug, limit: 5 });
-      if (sessions.length === 0 && projectSlug) {
-        sessions = await index.list({ limit: 5 });
-      }
-      if (sessions.length === 0 || shuttingDown) return;
-      const lines = sessions.map((s) => {
-        const name = s.name || truncate2(s.firstUserMessage, 80);
-        const date = s.startedAt.split("T")[0];
-        const rel = formatRelativeDate(s.startedAt);
-        const displayCwd = s.cwd.replace(process.env.HOME || "", "~").slice(0, 60);
-        const msgs = `${s.userMessageCount} user, ${s.assistantMessageCount} assistant`;
-        const mode = s.models[0] ? ` Mode: ${s.models[0].split("/").pop()}` : "";
-        return `- **${rel}**: **${name}** (${date}) Project: ${s.projectSlug} | CWD: ${displayCwd} Messages: ${msgs}${mode}`;
-      });
-      const primer = `## Recent Sessions (this project)
-${lines.join("\n")}
-`;
-      const trimmed = primer.length > 1500 ? primer.slice(0, 1500) + "\n" : primer;
-      pi.sendMessage(
-        {
-          customType: "pi-session-search-primer",
-          content: trimmed,
-          display: false,
-          details: { sessionCount: sessions.length }
-        },
-        { triggerTurn: false }
-      );
-    } catch {
-    }
-  }
-  pi.on("session_start", async (_event, ctx) => {
-    sessionCwd = ctx.cwd;
-    try {
-      currentConfig = loadConfig(sessionCwd);
-    } catch (err) {
-      ctx.ui.notify(`session-search: ${err.message}`, "warning");
-    }
-    let syncAction = resolveSyncAction(currentConfig?.sync?.interval);
-    effectiveSyncIntervalMs = syncAction.intervalMs ?? DEFAULT_SYNC_INTERVAL_MS;
-    let initialAction = resolveInitialSyncAction(currentConfig?.sync?.initialDelay);
-    if (currentConfig?.sync?.disableForChild && isChildProcess()) {
-      syncAction = { disabled: true };
-      initialAction = { skip: true };
-      ctx.ui.notify("session-search: sync auto-disabled (child process detected)", "info");
-    }
-    const primerDone = startIndex(currentConfig, ctx, syncAction, initialAction);
-    await Promise.race([
-      primerDone,
-      new Promise((r) => setTimeout(r, PRIMER_WAIT_MS).unref())
-    ]);
-  });
-  function notifySyncError(ctx) {
-    return (msg) => ctx.ui.notify(`session-search: ${msg}`, "warning");
-  }
-  function formatChanges(r, movedLabel = " moved") {
-    const parts = [];
-    if (r.added) parts.push(`+${r.added}`);
-    if (r.updated) parts.push(`~${r.updated}`);
-    if (r.removed) parts.push(`-${r.removed}`);
-    if (r.moved) parts.push(`\u2197${r.moved}${movedLabel}`);
-    return parts.join(" ");
-  }
-  function openIndex(options, ctx) {
-    if (!useIndexWorker || !existsSync4(INDEX_WORKER_FILE)) return createIndexService(options);
-    return spawnIndexWorker(INDEX_WORKER_FILE, options, (err) => {
-      indexState = "failed";
-      indexError = err.message;
-      if (syncTimer) clearInterval(syncTimer);
-      syncTimer = null;
-      if (!shuttingDown) ctx.ui.notify(`session-search: ${err.message}`, "error");
-    });
-  }
-  async function startIndex(config, ctx, syncAction, initialAction) {
-    try {
-      indexState = "loading";
-      const index = openIndex(
-        {
-          indexDir: getIndexDir(sessionCwd),
-          extraSessionDirs: config?.extraSessionDirs ?? [],
-          extraArchiveDirs: config?.extraArchiveDirs ?? [],
-          sessionDir: config?.sessionDir,
-          archiveDir: config?.archiveDir,
-          embedder: config?.embedder,
-          fusion: config?.fusion
-        },
-        ctx
-      );
-      sessionIndex = index;
-      await new Promise((r) => setImmediate(r));
-      if (shuttingDown) return;
-      await index.load();
-      if (shuttingDown) return;
-      indexState = "warming";
-      if (config?.primer?.enabled === false) {
-        ctx.ui.notify("session-search: primer disabled via config", "info");
-      } else {
-        await injectPrimer(index, ctx);
-      }
-      if (shuttingDown) return;
-      scheduleSyncs(index, ctx, syncAction, initialAction);
-    } catch (err) {
-      if (indexState !== "failed") {
-        indexState = "failed";
-        indexError = err.message;
-        if (!shuttingDown) ctx.ui.notify(`session-search init failed: ${err.message}`, "error");
-      }
-      void sessionIndex?.close().catch(() => {
-      });
-      sessionIndex = null;
-    }
-  }
-  function scheduleSyncs(index, ctx, syncAction, initialAction) {
-    const initAction = initialAction ?? resolveInitialSyncAction(DEFAULT_INITIAL_DELAY_MS);
-    if (initAction.skip) {
-      indexState = "ready";
-      ctx.ui.notify(
-        "session-search: initial sync skipped (set sync.initialDelay >= 0 to enable)",
-        "info"
-      );
-    } else if (initAction.fallback) {
-      ctx.ui.notify(
-        "session-search: invalid sync.initialDelay, falling back to immediate",
-        "warning"
-      );
-    }
-    if (!initAction.skip) {
-      const SYNC_TIMEOUT_MS = 6e5;
-      const delayMs = initAction.delayMs ?? DEFAULT_INITIAL_DELAY_MS;
-      const runSync = () => Promise.race([
-        index.sync({
-          onProgress: (msg) => ctx.ui.setStatus("session-search", msg),
-          onError: notifySyncError(ctx)
-        }),
-        new Promise(
-          (resolve2) => scheduleTimer(() => resolve2(null), SYNC_TIMEOUT_MS)
-        )
-      ]);
-      const initialSync = async () => {
-        try {
-          const syncResult = await runSync();
-          if (shuttingDown) return;
-          if (syncResult === null) {
-            ctx.ui.notify("session-search: sync timed out (index may be stale)", "warning");
-            ctx.ui.setStatus("session-search", "");
-          } else {
-            const changes = formatChanges(syncResult);
-            if (changes) {
-              ctx.ui.setStatus(
-                "session-search",
-                `Sessions: ${changes} (${await index.size()} total)`
-              );
-              scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5e3);
-            }
-          }
-        } catch (err) {
-          if (shuttingDown) return;
-          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
-          ctx.ui.setStatus("session-search", "");
-        } finally {
-          if (indexState === "warming") indexState = "ready";
-        }
-      };
-      if (delayMs > 0) scheduleTimer(() => void initialSync(), delayMs);
-      else setImmediate(() => void initialSync());
-    }
-    const action = syncAction ?? resolveSyncAction(effectiveSyncIntervalMs);
-    if (action.disabled) {
-      ctx.ui.notify("session-search: auto-sync disabled (set sync.interval > 0 to re-enable)", "info");
-    } else if (action.fallback) {
-      ctx.ui.notify(
-        `session-search: invalid sync.interval, falling back to ${DEFAULT_SYNC_INTERVAL_MS / 1e3}s`,
-        "warning"
-      );
-      effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
-    }
-    if (!action.disabled && effectiveSyncIntervalMs > 0) {
-      syncTimer = setInterval(async () => {
-        if (shuttingDown || indexState === "failed") return;
-        try {
-          const result = await index.sync();
-          if (shuttingDown) return;
-          const changes = formatChanges(result);
-          if (changes) {
-            ctx.ui.setStatus(
-              "session-search",
-              `Sessions synced: ${changes} (${await index.size()} total)`
-            );
-            scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5e3);
-          }
-        } catch {
-        }
-      }, effectiveSyncIntervalMs);
-    }
-  }
-  pi.on("session_shutdown", async () => {
-    shuttingDown = true;
-    if (syncTimer) {
-      clearInterval(syncTimer);
-      syncTimer = null;
-    }
-    for (const handle of pendingTimers) {
-      clearTimeout(handle);
-    }
-    pendingTimers.clear();
-    const index = sessionIndex;
-    sessionIndex = null;
-    await index?.close().catch(() => {
-    });
-  });
-  pi.registerCommand("session-embeddings-setup", {
-    description: "Enable semantic embeddings for hybrid search (FTS5 is always on)",
-    handler: async (_args, ctx) => {
-      const providerChoice = await ctx.ui.select("Embedding provider:", [
-        "openai \u2014 OpenAI API (text-embedding-3-small)",
-        "mistral \u2014 Mistral API (mistral-embed)",
-        "bedrock \u2014 AWS Bedrock (Titan Embeddings v2)",
-        "ollama \u2014 Local Ollama (nomic-embed-text)",
-        "openai-compatible \u2014 Any OpenAI-compatible API"
-      ]);
-      if (!providerChoice) {
-        ctx.ui.notify("Setup cancelled.", "info");
-        return;
-      }
-      const providerType = providerChoice.split(" ")[0];
-      let embedder;
-      switch (providerType) {
-        case "openai": {
-          const apiKey = await ctx.ui.input(
-            "OpenAI API key (or env var name):",
-            process.env.OPENAI_API_KEY ? "(using OPENAI_API_KEY from env)" : ""
-          );
-          const model = await ctx.ui.input(
-            "Model:",
-            "text-embedding-3-small"
-          );
-          embedder = {
-            type: "openai",
-            apiKey: apiKey?.startsWith("(") ? void 0 : apiKey || void 0,
-            model: model || "text-embedding-3-small",
-            dimensions: 512
-          };
-          break;
-        }
-        case "mistral": {
-          const apiKey = await ctx.ui.input(
-            "Mistral API key:",
-            process.env.MISTRAL_API_KEY ? "(using MISTRAL_API_KEY from env)" : ""
-          );
-          const model = await ctx.ui.input(
-            "Model:",
-            "mistral-embed"
-          );
-          embedder = {
-            type: "mistral",
-            apiKey: apiKey?.startsWith("(") ? void 0 : apiKey || void 0,
-            model: model || "mistral-embed",
-            dimensions: 1024
-          };
-          break;
-        }
-        case "bedrock": {
-          const profile = await ctx.ui.input("AWS profile:", "default");
-          const region = await ctx.ui.input("AWS region:", "us-east-1");
-          const model = await ctx.ui.input(
-            "Model:",
-            "amazon.titan-embed-text-v2:0"
-          );
-          embedder = {
-            type: "bedrock",
-            profile: profile || "default",
-            region: region || "us-east-1",
-            model: model || "amazon.titan-embed-text-v2:0",
-            dimensions: 512
-          };
-          break;
-        }
-        case "ollama": {
-          const url = await ctx.ui.input(
-            "Ollama URL:",
-            "http://localhost:11434"
-          );
-          const model = await ctx.ui.input("Model:", "nomic-embed-text");
-          embedder = {
-            type: "ollama",
-            url: url || "http://localhost:11434",
-            model: model || "nomic-embed-text"
-          };
-          break;
-        }
-        case "openai-compatible": {
-          const baseUrl = await ctx.ui.input(
-            "Base URL (e.g. https://api.together.xyz):",
-            ""
-          );
-          if (!baseUrl) {
-            ctx.ui.notify("Base URL is required for openai-compatible.", "warning");
-            return;
-          }
-          const apiKey = await ctx.ui.input("API key:", "");
-          const model = await ctx.ui.input("Model:", "");
-          const dims = await ctx.ui.input("Dimensions (e.g. 512, 1024):", "512");
-          const sendDims = await ctx.ui.input(
-            "Send dimensions parameter? (true only for models that support it):",
-            "false"
-          );
-          embedder = {
-            type: "openai-compatible",
-            baseUrl: baseUrl.replace(/\/$/, ""),
-            apiKey: apiKey || void 0,
-            model: model || void 0,
-            dimensions: parseInt(dims || "512", 10),
-            sendDimensions: sendDims?.toLowerCase() === "true"
-          };
-          break;
-        }
-      }
-      const extraDirs = await ctx.ui.input(
-        "Extra session directories (comma-separated, optional):",
-        ""
-      );
-      const extraArchive = await ctx.ui.input(
-        "Extra archive directories (comma-separated, optional):",
-        ""
-      );
-      saveConfig({
-        embedder,
-        extraSessionDirs: extraDirs ? extraDirs.split(",").map((d) => d.trim()).filter(Boolean) : void 0,
-        extraArchiveDirs: extraArchive ? extraArchive.split(",").map((d) => d.trim()).filter(Boolean) : void 0
-      }, sessionCwd);
-      ctx.ui.notify(
-        `Config saved to ${getConfigPath(sessionCwd)}. Run /reload to activate.`,
-        "info"
-      );
-    }
-  });
-  pi.registerCommand("session-sync", {
-    description: "Force an immediate incremental re-sync of session index",
-    handler: async (_args, ctx) => {
-      const index = usableIndex();
-      if (typeof index === "string") {
-        ctx.ui.notify(index, "warning");
-        return;
-      }
-      try {
-        const r = await index.sync({
-          onProgress: (msg) => ctx.ui.setStatus("session-search", msg),
-          onError: notifySyncError(ctx)
-        });
-        ctx.ui.notify(
-          `Synced: ${formatChanges(r, "") || "no changes"} (${await index.size()} total)`,
-          "info"
-        );
-        ctx.ui.setStatus("session-search", "");
-      } catch (err) {
-        ctx.ui.notify(`Sync failed: ${err.message}`, "error");
-      }
-    }
-  });
-  pi.registerCommand("session-reindex", {
-    description: "Force full re-index of all session files",
-    handler: async (_args, ctx) => {
-      const index = usableIndex();
-      if (typeof index === "string") {
-        ctx.ui.notify(index, "warning");
-        return;
-      }
-      ctx.ui.notify("Re-indexing sessions...", "info");
-      try {
-        await index.rebuild({
-          onProgress: (msg) => ctx.ui.setStatus("session-search", msg),
-          onError: notifySyncError(ctx)
-        });
-        ctx.ui.notify(
-          `Re-indexed: ${await index.size()} sessions`,
-          "info"
-        );
-        ctx.ui.setStatus("session-search", "");
-      } catch (err) {
-        ctx.ui.notify(`Re-index failed: ${err.message}`, "error");
-      }
-    }
-  });
-  pi.registerTool({
-    name: "session_search",
-    label: "Session Search",
-    description: "Semantic search over past pi sessions. Returns summaries of the most relevant sessions for a natural language query. Use to find previous work, decisions, debugging sessions, or code changes.",
-    promptSnippet: "Semantic search over past pi sessions \u2014 find previous work, decisions, and context by topic.",
-    promptGuidelines: [
-      "Use session_search to find past coding sessions relevant to the current task (e.g. 'when did we refactor the auth module', 'previous work on Lambda timeouts').",
-      "Pass the optional `project` parameter to limit search to a single project \u2014 use a substring of the project path or slug (e.g. 'pi-session-search').",
-      "Use session_list for browsing by date/project. Use session_read to dive into a specific session."
-    ],
-    parameters: Type.Object({
-      query: Type.String({ description: "Natural language search query" }),
-      project: Type.Optional(
-        Type.String({
-          description: "Filter by project name or path substring (matches projectSlug or cwd, same semantics as session_list)"
-        })
-      ),
-      limit: Type.Optional(
-        Type.Number({
-          description: "Max results to return (default 10, max 25)"
-        })
-      )
-    }),
-    async execute(_toolCallId, params) {
-      const index = usableIndex();
-      if (typeof index === "string") return textResult(index);
-      const warming = indexState === "warming";
-      const note = warming ? `${WARMING_NOTE}
-
-` : "";
-      const limit = Math.min(params.limit ?? 10, 25);
-      try {
-        const indexSize = await index.size();
-        if (indexSize === 0) {
-          return textResult(
-            warming ? "Session index warming: no sessions indexed yet. Try again in a moment." : "Session index is empty."
-          );
-        }
-        const results = await index.search(params.query, limit, params.project);
-        if (results.length === 0) {
-          const scope = params.project ? ` in project "${params.project}"` : "";
-          return textResult(`${note}No relevant sessions found for: "${params.query}"${scope}`);
-        }
-        const home = process.env.HOME || "";
-        const output = results.map((r, i) => {
-          const score = (r.score * 100).toFixed(1);
-          const displayFile = r.session.file.replace(home, "~");
-          return [
-            `### ${i + 1}. ${r.session.name || truncate2(r.session.firstUserMessage, 80)} (${score}% match)`,
-            `File: ${displayFile}`,
-            `ID: ${r.session.id}`,
-            `Date: ${r.session.startedAt.split("T")[0]} | CWD: ${r.session.cwd}`,
-            r.summary
-          ].join("\n");
-        }).join("\n\n---\n\n");
-        const scopeNote = params.project ? ` scoped to "${params.project}"` : "";
-        const header = `${note}Found ${results.length} sessions for "${params.query}"${scopeNote} (${indexSize} sessions indexed):
-
-`;
-        return textResult(header + output, {
-          resultCount: results.length,
-          indexSize,
-          project: params.project,
-          warming
-        });
-      } catch (err) {
-        throw new Error(`session-search failed: ${err.message}`);
-      }
-    }
-  });
-  pi.registerTool({
-    name: "session_list",
-    label: "Session List",
-    description: "List past pi sessions with optional filters by project, date range, or archive status. Returns session metadata and summaries.",
-    promptSnippet: "List/filter past pi sessions by project, date, or archive status.",
-    parameters: Type.Object({
-      project: Type.Optional(
-        Type.String({ description: "Filter by project name or path substring" })
-      ),
-      after: Type.Optional(
-        Type.String({
-          description: "Only sessions after this date (ISO format, e.g. 2026-03-01)"
-        })
-      ),
-      before: Type.Optional(
-        Type.String({
-          description: "Only sessions before this date (ISO format)"
-        })
-      ),
-      archived: Type.Optional(
-        Type.Boolean({ description: "Filter by archived status" })
-      ),
-      limit: Type.Optional(
-        Type.Number({ description: "Max results (default 20, max 50)" })
-      )
-    }),
-    async execute(_toolCallId, params) {
-      const index = usableIndex();
-      if (typeof index === "string") return textResult(index);
-      const warming = indexState === "warming";
-      const note = warming ? `${WARMING_NOTE}
-
-` : "";
-      const indexSize = await index.size();
-      if (indexSize === 0) {
-        return textResult(
-          warming ? "Session index warming: no sessions indexed yet. Try again in a moment." : "Session index is empty."
-        );
-      }
-      const limit = Math.min(params.limit ?? 20, 50);
-      const sessions = await index.list({
-        project: params.project,
-        after: params.after,
-        before: params.before,
-        archived: params.archived,
-        limit
-      });
-      if (sessions.length === 0) {
-        return textResult(`${note}No sessions match the filters.`);
-      }
-      const home = process.env.HOME || "";
-      const output = sessions.map((s, i) => {
-        const name = s.name || truncate2(s.firstUserMessage, 60);
-        const date = s.startedAt.split("T")[0];
-        const tools = s.toolCalls.slice(0, 3).map((t) => t.name).join(", ");
-        const arch = s.archived ? " (archived)" : "";
-        const displayFile = s.file.replace(home, "~");
-        return `${i + 1}. **${name}** \u2014 ${date}${arch}
-   CWD: ${s.cwd} | ${s.userMessageCount} msgs | Tools: ${tools}
-   File: ${displayFile}`;
-      }).join("\n\n");
-      const header = `${note}${sessions.length} sessions (${indexSize} total indexed):
-
-`;
-      return textResult(header + output, { resultCount: sessions.length, warming });
-    }
-  });
-  pi.registerTool({
-    name: "session_read",
-    label: "Session Read",
-    description: "Read the full conversation from a past pi session. Provide the session file path or session ID. Supports pagination for large sessions.",
-    promptSnippet: "Read the full conversation from a specific past pi session by file path or ID.",
-    parameters: Type.Object({
-      session: Type.String({
-        description: "Session file path (from session_search/session_list results) or session UUID"
-      }),
-      offset: Type.Optional(
-        Type.Number({
-          description: "Start from this entry index (for pagination, default 0)"
-        })
-      ),
-      limit: Type.Optional(
-        Type.Number({
-          description: "Max entries to return (default 50, max 100)"
-        })
-      ),
-      include_tools: Type.Optional(
-        Type.Boolean({
-          description: "Include tool results in output (default false, verbose)"
-        })
-      )
-    }),
-    async execute(_toolCallId, params) {
-      let filePath = params.session;
-      if (!filePath.endsWith(".jsonl") && !filePath.includes("/")) {
-        const index = usableIndex();
-        if (typeof index === "string") return textResult(index);
-        const entry = await index.get(filePath);
-        if (entry) {
-          filePath = entry.session.file;
-        } else {
-          const note = indexState === "warming" ? `
-
-${WARMING_NOTE}` : "";
-          return textResult(
-            `Session not found: "${params.session}". Use session_search or session_list to find the session file path.${note}`
-          );
-        }
-      }
-      if (filePath.startsWith("~")) {
-        filePath = filePath.replace("~", process.env.HOME || "");
-      }
-      const home = process.env.HOME || "";
-      const allowedRoots = [
-        resolve(home, ".pi", "agent", "sessions"),
-        resolve(home, ".pi", "agent", "sessions-archive"),
-        ...(currentConfig?.extraSessionDirs ?? []).map((d) => resolve(d)),
-        ...(currentConfig?.extraArchiveDirs ?? []).map((d) => resolve(d))
-      ];
-      const resolvedPath = resolve(filePath);
-      if (!allowedRoots.some((root) => resolvedPath.startsWith(root + "/") || resolvedPath === root)) {
-        return textResult(
-          `Access denied: path "${filePath}" is outside the allowed session directories.`
-        );
-      }
-      const limit = Math.min(params.limit ?? 50, 100);
-      const output = readSessionConversation(filePath, {
-        offset: params.offset ?? 0,
-        limit,
-        includeTools: params.include_tools ?? false
-      });
-      return textResult(output, { file: filePath });
-    }
-  });
-}
-export {
-  _setIndexWorkerEnabled,
-  buildContent,
-  buildSummary,
-  index_default as default,
-  formatRelativeDate,
-  isChildProcess,
-  loadConfig,
-  parseSession,
-  pathToSlug,
-  resolveInitialSyncAction,
-  resolveSyncAction,
-  slugToProject,
-  toFtsQuery,
-  truncate2 as truncate
-};
-//# sourceMappingURL=index.js.map
+// src/index-worker.ts
+var port = parentPort;
+if (!port) throw new Error("index-worker must run as a worker thread");
+var service = createIndexService(workerData);
+port.on("message", (req) => {
+  void handleWorkerRequest(service, req, (reply) => port.postMessage(reply));
+});
+//# sourceMappingURL=index-worker.js.map
