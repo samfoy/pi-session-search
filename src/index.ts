@@ -28,10 +28,12 @@ const INDEX_WORKER_FILE = fileURLToPath(new URL("../dist/index-worker.js", impor
 const PRIMER_WAIT_MS = 1000;
 
 let useIndexWorker = true;
+let indexWorkerFile = INDEX_WORKER_FILE;
 
-/** Test-only: run the index in-process instead of on a worker thread. */
-export function _setIndexWorkerEnabled(enabled: boolean): void {
+/** Test-only: run the index in-process, or on another worker script. */
+export function _setIndexWorkerEnabled(enabled: boolean, file = INDEX_WORKER_FILE): void {
   useIndexWorker = enabled;
+  indexWorkerFile = file;
 }
 
 /**
@@ -42,6 +44,11 @@ type IndexState = "off" | "loading" | "warming" | "ready" | "failed";
 
 const WARMING_NOTE =
   "Note: session index warming (initial sync still running), so results may be incomplete.";
+
+/** "<cause>. Run /reload to restart indexing." without doubling a trailing period. */
+function withReloadHint(cause: string): string {
+  return `${cause.replace(/\.$/, "")}. Run /reload to restart indexing.`;
+}
 
 /** Build a text tool result; one details type keeps every return path assignable. */
 function textResult(text: string, details: Record<string, unknown> = {}) {
@@ -148,7 +155,7 @@ export default function (pi: ExtensionAPI) {
    * should return instead.
    */
   function usableIndex(): IndexService | string {
-    if (indexState === "failed") return `Session index unavailable: ${indexError}`;
+    if (indexState === "failed") return `Session index unavailable: ${withReloadHint(indexError)}`;
     if (!sessionIndex || indexState === "off" || indexState === "loading") {
       return "Session index warming (loading the saved index). Try again in a moment.";
     }
@@ -271,13 +278,13 @@ export default function (pi: ExtensionAPI) {
   }
 
   function openIndex(options: IndexOptions, ctx: any): IndexService {
-    if (!useIndexWorker || !existsSync(INDEX_WORKER_FILE)) return createIndexService(options);
-    return spawnIndexWorker(INDEX_WORKER_FILE, options, (err) => {
+    if (!useIndexWorker || !existsSync(indexWorkerFile)) return createIndexService(options);
+    return spawnIndexWorker(indexWorkerFile, options, (err) => {
       indexState = "failed";
       indexError = err.message;
       if (syncTimer) clearInterval(syncTimer);
       syncTimer = null;
-      if (!shuttingDown) ctx.ui.notify(`session-search: ${err.message}`, "error");
+      if (!shuttingDown) ctx.ui.notify(`session-search: ${withReloadHint(err.message)}`, "error");
     });
   }
 
@@ -401,7 +408,10 @@ export default function (pi: ExtensionAPI) {
           }
         } catch (err: any) {
           if (shuttingDown) return;
-          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+          // A worker crash was already reported by openIndex's onCrash.
+          if (indexState !== "failed") {
+            ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+          }
           ctx.ui.setStatus("session-search", "");
         } finally {
           if (indexState === "warming") indexState = "ready";

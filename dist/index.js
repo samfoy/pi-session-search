@@ -1595,10 +1595,15 @@ import { fileURLToPath } from "node:url";
 var INDEX_WORKER_FILE = fileURLToPath(new URL("../dist/index-worker.js", import.meta.url));
 var PRIMER_WAIT_MS = 1e3;
 var useIndexWorker = true;
-function _setIndexWorkerEnabled(enabled) {
+var indexWorkerFile = INDEX_WORKER_FILE;
+function _setIndexWorkerEnabled(enabled, file = INDEX_WORKER_FILE) {
   useIndexWorker = enabled;
+  indexWorkerFile = file;
 }
 var WARMING_NOTE = "Note: session index warming (initial sync still running), so results may be incomplete.";
+function withReloadHint(cause) {
+  return `${cause.replace(/\.$/, "")}. Run /reload to restart indexing.`;
+}
 function textResult(text, details = {}) {
   return { content: [{ type: "text", text }], details };
 }
@@ -1649,7 +1654,7 @@ function index_default(pi) {
   }
   let effectiveSyncIntervalMs = DEFAULT_SYNC_INTERVAL_MS;
   function usableIndex() {
-    if (indexState === "failed") return `Session index unavailable: ${indexError}`;
+    if (indexState === "failed") return `Session index unavailable: ${withReloadHint(indexError)}`;
     if (!sessionIndex || indexState === "off" || indexState === "loading") {
       return "Session index warming (loading the saved index). Try again in a moment.";
     }
@@ -1726,13 +1731,13 @@ ${lines.join("\n")}
     return parts.join(" ");
   }
   function openIndex(options, ctx) {
-    if (!useIndexWorker || !existsSync4(INDEX_WORKER_FILE)) return createIndexService(options);
-    return spawnIndexWorker(INDEX_WORKER_FILE, options, (err) => {
+    if (!useIndexWorker || !existsSync4(indexWorkerFile)) return createIndexService(options);
+    return spawnIndexWorker(indexWorkerFile, options, (err) => {
       indexState = "failed";
       indexError = err.message;
       if (syncTimer) clearInterval(syncTimer);
       syncTimer = null;
-      if (!shuttingDown) ctx.ui.notify(`session-search: ${err.message}`, "error");
+      if (!shuttingDown) ctx.ui.notify(`session-search: ${withReloadHint(err.message)}`, "error");
     });
   }
   async function startIndex(config, ctx, syncAction, initialAction) {
@@ -1819,7 +1824,9 @@ ${lines.join("\n")}
           }
         } catch (err) {
           if (shuttingDown) return;
-          ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+          if (indexState !== "failed") {
+            ctx.ui.notify(`session-search: initial sync failed: ${err.message}`, "warning");
+          }
           ctx.ui.setStatus("session-search", "");
         } finally {
           if (indexState === "warming") indexState = "ready";
