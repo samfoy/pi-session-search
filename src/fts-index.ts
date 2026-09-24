@@ -77,6 +77,21 @@ export class FtsSessionIndex {
         tokenize='porter unicode61'
       );
     `);
+
+    // FTS5 has no unique constraint, and releases before 1.6.0 could index one
+    // id twice when two pi processes synced at once. Keep each id's newest row.
+    // The read-only check spares normal opens a write lock.
+    if (this.db.prepare("SELECT 1 FROM sessions GROUP BY id HAVING COUNT(*) > 1 LIMIT 1").get()) {
+      this.db.exec(`
+        DELETE FROM sessions WHERE rowid IN (
+          SELECT rowid FROM (
+            SELECT rowid, row_number() OVER (
+              PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
+            ) AS rank FROM sessions
+          ) WHERE rank > 1
+        )
+      `);
+    }
   }
 
   save(): void { /* auto-persisted */ }
@@ -188,7 +203,9 @@ export class FtsSessionIndex {
       const content = buildContent(session);
       const summary = buildSummary(session);
       const isUpdate = currentIds.has(item.id);
-      if (isUpdate) replaceDel.run(item.id);
+      // Delete even for ids that looked new: another pi process sharing this
+      // DB may have inserted the id since currentRows was read.
+      replaceDel.run(item.id);
       insertStmt.run(
         session.id,
         session.file,

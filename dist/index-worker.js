@@ -550,6 +550,17 @@ var FtsSessionIndex = class {
         tokenize='porter unicode61'
       );
     `);
+    if (this.db.prepare("SELECT 1 FROM sessions GROUP BY id HAVING COUNT(*) > 1 LIMIT 1").get()) {
+      this.db.exec(`
+        DELETE FROM sessions WHERE rowid IN (
+          SELECT rowid FROM (
+            SELECT rowid, row_number() OVER (
+              PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
+            ) AS rank FROM sessions
+          ) WHERE rank > 1
+        )
+      `);
+    }
   }
   save() {
   }
@@ -640,7 +651,7 @@ var FtsSessionIndex = class {
       const content = buildContent(session);
       const summary = buildSummary(session);
       const isUpdate = currentIds.has(item.id);
-      if (isUpdate) replaceDel.run(item.id);
+      replaceDel.run(item.id);
       insertStmt.run(
         session.id,
         session.file,
