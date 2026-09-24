@@ -503,6 +503,8 @@ function fts5ErrorMessage() {
 }
 
 // src/fts-index.ts
+var BUSY_TIMEOUT_MS = 5e3;
+var HEALED_USER_VERSION = 1;
 var FtsSessionIndex = class {
   db;
   dbPath;
@@ -523,7 +525,7 @@ var FtsSessionIndex = class {
   async load() {
     assertFts5Available();
     this.db = new DatabaseSync2(this.dbPath);
-    this.db.exec("PRAGMA busy_timeout = 5000;");
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     let hasSizeBytes = false;
     try {
       this.db.prepare("SELECT sizeBytes FROM sessions LIMIT 0").all();
@@ -550,8 +552,29 @@ var FtsSessionIndex = class {
         tokenize='porter unicode61'
       );
     `);
-    if (this.db.prepare("SELECT 1 FROM sessions GROUP BY id HAVING COUNT(*) > 1 LIMIT 1").get()) {
+    this.dropOldDuplicatesOnce();
+  }
+  /**
+   * FTS5 has no unique constraint, and releases before 1.6.0 could index one
+   * id twice when two pi processes synced at once. Scan for that once per DB;
+   * sync() handles later races. Best-effort: while another connection holds
+   * the write lock it is skipped, and the next open or adding sync heals.
+   */
+  dropOldDuplicatesOnce() {
+    const { user_version } = this.db.prepare("PRAGMA user_version").get();
+    if (user_version >= HEALED_USER_VERSION) return;
+    try {
+      this.db.exec("PRAGMA busy_timeout = 0");
+      try {
+        this.db.exec("BEGIN IMMEDIATE");
+      } finally {
+        this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      }
       dropDuplicateRows(this.db);
+      this.db.exec(`PRAGMA user_version = ${HEALED_USER_VERSION}`);
+      this.db.exec("COMMIT");
+    } catch {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
   }
   save() {

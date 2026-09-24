@@ -7,6 +7,10 @@ import type { SearchResult, ListFilters } from "./session-index";
 import { buildSummary, createYielder } from "./utils";
 import { assertFts5Available } from "./fts5-probe";
 
+const BUSY_TIMEOUT_MS = 5000;
+/** PRAGMA user_version once load() has removed duplicates older releases left. */
+const HEALED_USER_VERSION = 1;
+
 /**
  * SQLite FTS5-backed session index. API-compatible with SessionIndex.
  * Requires no embedder — uses BM25 keyword search.
@@ -44,7 +48,7 @@ export class FtsSessionIndex {
     assertFts5Available();
 
     this.db = new DatabaseSync(this.dbPath);
-    this.db.exec("PRAGMA busy_timeout = 5000;");
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
 
     // Migrate: add sizeBytes column if missing (FTS5 UNINDEXED columns)
     // FTS5 virtual tables don't support ALTER TABLE ADD COLUMN, so we check
@@ -78,10 +82,30 @@ export class FtsSessionIndex {
       );
     `);
 
-    // FTS5 has no unique constraint, and releases before 1.6.0 could index one
-    // id twice when two pi processes synced at once. Keep each id's newest row.
-    if (this.db.prepare("SELECT 1 FROM sessions GROUP BY id HAVING COUNT(*) > 1 LIMIT 1").get()) {
+    this.dropOldDuplicatesOnce();
+  }
+
+  /**
+   * FTS5 has no unique constraint, and releases before 1.6.0 could index one
+   * id twice when two pi processes synced at once. Scan for that once per DB;
+   * sync() handles later races. Best-effort: while another connection holds
+   * the write lock it is skipped, and the next open or adding sync heals.
+   */
+  private dropOldDuplicatesOnce(): void {
+    const { user_version } = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    if (user_version >= HEALED_USER_VERSION) return;
+    try {
+      this.db.exec("PRAGMA busy_timeout = 0");
+      try {
+        this.db.exec("BEGIN IMMEDIATE");
+      } finally {
+        this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      }
       dropDuplicateRows(this.db);
+      this.db.exec(`PRAGMA user_version = ${HEALED_USER_VERSION}`);
+      this.db.exec("COMMIT");
+    } catch {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
   }
 
