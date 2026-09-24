@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 /**
  * Check whether the SQLite build that ships with this Node runtime has
- * FTS5 compiled in. Node 24+ does; Node 22's bundled SQLite does not.
+ * FTS5 compiled in. Node 22.19+ and 24+ do; older Node 22 releases did not.
  *
  * Without this check, `CREATE VIRTUAL TABLE ... USING fts5(...)` throws
  * deep inside `load()`, leaves a DB file with no tables, and every
@@ -34,7 +34,7 @@ export function assertFts5Available(): void {
 function fts5ErrorMessage(): string {
   return (
     "SQLite FTS5 is not available in this Node runtime. " +
-    "pi-session-search requires Node 24+ (where node:sqlite ships with FTS5 compiled in). " +
+    "pi-session-search requires Node 22.19+ or 24+ (where node:sqlite ships with FTS5 compiled in). " +
     `Current: Node ${process.versions.node}. Upgrade Node and restart pi.`
   );
 }

@@ -609,7 +609,7 @@ function assertFts5Available() {
   }
 }
 function fts5ErrorMessage() {
-  return `SQLite FTS5 is not available in this Node runtime. pi-session-search requires Node 24+ (where node:sqlite ships with FTS5 compiled in). Current: Node ${process.versions.node}. Upgrade Node and restart pi.`;
+  return `SQLite FTS5 is not available in this Node runtime. pi-session-search requires Node 22.19+ or 24+ (where node:sqlite ships with FTS5 compiled in). Current: Node ${process.versions.node}. Upgrade Node and restart pi.`;
 }
 
 // src/fts-index.ts

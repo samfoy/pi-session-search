@@ -373,7 +373,7 @@ export default function (pi: ExtensionAPI) {
         }, effectiveSyncIntervalMs);
       }
     } catch (err: any) {
-      // Failed init (e.g. FTS5 unavailable on Node 22) — clear the broken
+      // Failed init (e.g. FTS5 unavailable on an old Node 22) — clear the broken
       // handle so downstream tool calls don't hit a half-initialized index
       // and surface "no such table: sessions" or similar.
       sessionIndex = null;

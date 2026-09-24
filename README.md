@@ -35,7 +35,7 @@ Or add to `~/.pi/agent/settings.json`:
 }
 ```
 
-Requires **Node 24+** — `node:sqlite` must include FTS5, which Node 22's bundled SQLite does not. On Node 22 you'll get `Error: no such table: sessions` at startup because the FTS5 virtual table never gets created.
+Requires **Node 22.19+** (pi's own floor). The index uses `node:sqlite` with FTS5, which Node 22.19+ and Node 24+ ship. Older Node 22 releases bundled SQLite without FTS5; on those the extension stops at startup with an error that says so.
 
 ## Setup
 

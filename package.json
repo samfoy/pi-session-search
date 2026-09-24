@@ -11,18 +11,28 @@
     "semantic-search",
     "embeddings"
   ],
+  "license": "MIT",
+  "author": "Sam Painter",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samfoy/pi-session-search.git"
+  },
+  "homepage": "https://github.com/samfoy/pi-session-search#readme",
+  "bugs": {
+    "url": "https://github.com/samfoy/pi-session-search/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "files": [
     "src",
+    "!src/__tests__",
     "dist",
     "skills",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/samfoy/pi-session-search"
-  },
   "pi": {
     "extensions": [
       "./dist/index.js"
@@ -52,6 +62,6 @@
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external",
     "check": "tsc --noEmit",
     "dev": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --watch --packages=external",
-    "prepare": "npm run build"
+    "prepack": "npm run build"
   }
 }

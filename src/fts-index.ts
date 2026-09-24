@@ -38,7 +38,7 @@ export class FtsSessionIndex {
 
   async load(): Promise<void> {
     // Fail fast with an actionable message on Node runtimes without FTS5
-    // (Node 22's bundled SQLite omits it). Without this probe the
+    // (older Node 22 releases omit it). Without this probe the
     // CREATE VIRTUAL TABLE below leaves the DB file with no tables and
     // later queries surface "no such table: sessions".
     assertFts5Available();
