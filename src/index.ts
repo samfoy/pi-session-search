@@ -1,5 +1,5 @@
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import {
   loadConfig,
   saveConfig,
@@ -17,6 +17,11 @@ import { resolve } from "node:path";
 import { truncate, pathToSlug, formatRelativeDate } from "./utils";
 
 type AnyIndex = SessionIndex | FtsSessionIndex;
+
+/** Build a text tool result; one details type keeps every return path assignable. */
+function textResult(text: string, details: Record<string, unknown> = {}) {
+  return { content: [{ type: "text" as const, text }], details };
+}
 
 /**
  * Resolve the effective sync interval and return the timer action.
@@ -351,7 +356,7 @@ export default function (pi: ExtensionAPI) {
             if (shuttingDown) return;
             const changes = result.added + result.updated + result.removed + result.moved;
             if (changes > 0) {
-              const parts = [];
+              const parts: string[] = [];
               if (result.added) parts.push(`+${result.added}`);
               if (result.updated) parts.push(`~${result.updated}`);
               if (result.removed) parts.push(`-${result.removed}`);
@@ -534,7 +539,7 @@ export default function (pi: ExtensionAPI) {
 
       ctx.ui.notify(
         `Config saved to ${getConfigPath(sessionCwd)}. Run /reload to activate.`,
-        "success"
+        "info"
       );
     },
   });
@@ -562,7 +567,7 @@ export default function (pi: ExtensionAPI) {
         if (r.moved) parts.push(`↗${r.moved}`);
         ctx.ui.notify(
           `Synced: ${parts.join(" ") || "no changes"} (${sessionIndex.size()} total)`,
-          "success",
+          "info",
         );
         ctx.ui.setStatus("session-search", "");
       } catch (err: any) {
@@ -593,7 +598,7 @@ export default function (pi: ExtensionAPI) {
         );
         ctx.ui.notify(
           `Re-indexed: ${sessionIndex.size()} sessions`,
-          "success"
+          "info"
         );
         ctx.ui.setStatus("session-search", "");
       } catch (err: any) {
@@ -637,7 +642,7 @@ export default function (pi: ExtensionAPI) {
         const msg = !sessionIndex
           ? "Session index not ready yet."
           : "Session index is empty — it may still be building. Try again in a moment.";
-        return { content: [{ type: "text", text: msg }], details: {} };
+        return textResult(msg);
       }
 
       const limit = Math.min(params.limit ?? 10, 25);
@@ -647,15 +652,7 @@ export default function (pi: ExtensionAPI) {
 
         if (results.length === 0) {
           const scope = params.project ? ` in project "${params.project}"` : "";
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No relevant sessions found for: "${params.query}"${scope}`,
-              },
-            ],
-            details: {},
-          };
+          return textResult(`No relevant sessions found for: "${params.query}"${scope}`);
         }
 
         const home = process.env.HOME || "";
@@ -676,10 +673,11 @@ export default function (pi: ExtensionAPI) {
         const scopeNote = params.project ? ` scoped to "${params.project}"` : "";
         const header = `Found ${results.length} sessions for "${params.query}"${scopeNote} (${sessionIndex.size()} sessions indexed):\n\n`;
 
-        return {
-          content: [{ type: "text", text: header + output }],
-          details: { resultCount: results.length, indexSize: sessionIndex.size(), project: params.project },
-        };
+        return textResult(header + output, {
+          resultCount: results.length,
+          indexSize: sessionIndex.size(),
+          project: params.project,
+        });
       } catch (err: any) {
         throw new Error(`session-search failed: ${err.message}`);
       }
@@ -723,7 +721,7 @@ export default function (pi: ExtensionAPI) {
         const msg = !sessionIndex
           ? "Session index not ready yet."
           : "Session index is empty.";
-        return { content: [{ type: "text", text: msg }], details: {} };
+        return textResult(msg);
       }
 
       const limit = Math.min(params.limit ?? 20, 50);
@@ -736,10 +734,7 @@ export default function (pi: ExtensionAPI) {
       });
 
       if (sessions.length === 0) {
-        return {
-          content: [{ type: "text", text: "No sessions match the filters." }],
-          details: {},
-        };
+        return textResult("No sessions match the filters.");
       }
 
       const home = process.env.HOME || "";
@@ -759,10 +754,7 @@ export default function (pi: ExtensionAPI) {
 
       const header = `${sessions.length} sessions (${sessionIndex.size()} total indexed):\n\n`;
 
-      return {
-        content: [{ type: "text", text: header + output }],
-        details: { resultCount: sessions.length },
-      };
+      return textResult(header + output, { resultCount: sessions.length });
     },
   });
 
@@ -811,15 +803,9 @@ export default function (pi: ExtensionAPI) {
         if (entry) {
           filePath = entry.session.file;
         } else {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Session not found: "${params.session}". Use session_search or session_list to find the session file path.`,
-              },
-            ],
-            details: {},
-          };
+          return textResult(
+            `Session not found: "${params.session}". Use session_search or session_list to find the session file path.`,
+          );
         }
       }
 
@@ -838,15 +824,9 @@ export default function (pi: ExtensionAPI) {
       ];
       const resolvedPath = resolve(filePath);
       if (!allowedRoots.some((root) => resolvedPath.startsWith(root + "/") || resolvedPath === root)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Access denied: path "${filePath}" is outside the allowed session directories.`,
-            },
-          ],
-          details: {},
-        };
+        return textResult(
+          `Access denied: path "${filePath}" is outside the allowed session directories.`,
+        );
       }
 
       const limit = Math.min(params.limit ?? 50, 100);
@@ -856,10 +836,7 @@ export default function (pi: ExtensionAPI) {
         includeTools: params.include_tools ?? false,
       });
 
-      return {
-        content: [{ type: "text", text: output }],
-        details: { file: filePath },
-      };
+      return textResult(output, { file: filePath });
     },
   });
 }

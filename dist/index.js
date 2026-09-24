@@ -1,5 +1,5 @@
 // src/index.ts
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 // src/config.ts
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -81,7 +81,8 @@ function loadConfig(cwd) {
     archiveDir: typeof file.archiveDir === "string" && file.archiveDir ? file.archiveDir : void 0,
     sync: syncCfg,
     primer: file.primer,
-    embedder: file.embedder
+    embedder: file.embedder,
+    fusion: file.fusion === "vector-primary" ? "vector-primary" : "rrf"
   };
 }
 function saveConfig(file, cwd) {
@@ -209,8 +210,9 @@ var OpenAICompatibleEmbedder = class {
         throw new Error(`Embeddings API ${res.status}: ${errBody.slice(0, 200)}`);
       }
       const json = await res.json();
-      for (const item of json.data) {
-        results[i + item.index] = item.embedding;
+      for (let k = 0; k < json.data.length; k++) {
+        const item = json.data[k];
+        results[i + (item.index ?? k)] = item.embedding;
       }
     }
     return results;
@@ -919,13 +921,14 @@ function stripHeavyFields(session) {
   };
 }
 var SessionIndex = class {
-  constructor(embedder, indexDir, extraSessionDirs = [], extraArchiveDirs = [], sessionDir, archiveDir) {
+  constructor(embedder, indexDir, extraSessionDirs = [], extraArchiveDirs = [], sessionDir, archiveDir, fusion = "rrf") {
     this.embedder = embedder;
     this.indexDir = indexDir;
     this.extraSessionDirs = extraSessionDirs;
     this.extraArchiveDirs = extraArchiveDirs;
     this.sessionDir = sessionDir;
     this.archiveDir = archiveDir;
+    this.fusion = fusion;
     mkdirSync3(indexDir, { recursive: true });
     this.indexPath = join4(indexDir, "session-index.json");
     this.fts = new FtsSide(indexDir);
@@ -936,6 +939,7 @@ var SessionIndex = class {
   extraArchiveDirs;
   sessionDir;
   archiveDir;
+  fusion;
   data = { version: INDEX_VERSION, sessions: {} };
   indexPath;
   fts;
@@ -1161,11 +1165,26 @@ var SessionIndex = class {
       cosineRanks.set(s.entry.session.id, i + 1);
     });
     const ftsRanks = this.fts.searchRanks(query, poolSize, allowedIds);
-    const K = 60;
-    const fused = /* @__PURE__ */ new Map();
-    for (const [id, r] of cosineRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
-    for (const [id, r] of ftsRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
-    const sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    let sorted;
+    if (this.fusion === "vector-primary") {
+      const ids = cosineScored.slice(0, limit).map((s) => s.entry.session.id);
+      const ftsAppendLimit = 5;
+      let appended = 0;
+      for (const [id] of ftsRanks) {
+        if (appended >= ftsAppendLimit) break;
+        if (!ids.includes(id)) {
+          ids.push(id);
+          appended++;
+        }
+      }
+      sorted = ids.slice(0, limit).map((id, rank) => [id, 1 / (60 + rank + 1)]);
+    } else {
+      const K = 60;
+      const fused = /* @__PURE__ */ new Map();
+      for (const [id, r] of cosineRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+      for (const [id, r] of ftsRanks) fused.set(id, (fused.get(id) ?? 0) + 1 / (K + r));
+      sorted = [...fused.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    }
     return sorted.map(([id, score]) => {
       const entry = this.data.sessions[id];
       if (!entry) return null;
@@ -1406,6 +1425,9 @@ function summarizeArgs(args) {
 
 // src/index.ts
 import { resolve } from "node:path";
+function textResult(text, details = {}) {
+  return { content: [{ type: "text", text }], details };
+}
 function resolveSyncAction(rawInterval) {
   if (rawInterval === void 0)
     return { disabled: false, intervalMs: DEFAULT_SYNC_INTERVAL_MS };
@@ -1516,7 +1538,8 @@ ${lines.join("\n")}
           config.extraSessionDirs,
           config.extraArchiveDirs,
           config.sessionDir,
-          config.archiveDir
+          config.archiveDir,
+          config.fusion
         );
       } else {
         sessionIndex = new FtsSessionIndex(
@@ -1773,7 +1796,7 @@ ${lines.join("\n")}
       }, sessionCwd);
       ctx.ui.notify(
         `Config saved to ${getConfigPath(sessionCwd)}. Run /reload to activate.`,
-        "success"
+        "info"
       );
     }
   });
@@ -1796,7 +1819,7 @@ ${lines.join("\n")}
         if (r.moved) parts.push(`\u2197${r.moved}`);
         ctx.ui.notify(
           `Synced: ${parts.join(" ") || "no changes"} (${sessionIndex.size()} total)`,
-          "success"
+          "info"
         );
         ctx.ui.setStatus("session-search", "");
       } catch (err) {
@@ -1822,7 +1845,7 @@ ${lines.join("\n")}
         );
         ctx.ui.notify(
           `Re-indexed: ${sessionIndex.size()} sessions`,
-          "success"
+          "info"
         );
         ctx.ui.setStatus("session-search", "");
       } catch (err) {
@@ -1856,22 +1879,14 @@ ${lines.join("\n")}
     async execute(_toolCallId, params, signal) {
       if (!sessionIndex || sessionIndex.size() === 0) {
         const msg = !sessionIndex ? "Session index not ready yet." : "Session index is empty \u2014 it may still be building. Try again in a moment.";
-        return { content: [{ type: "text", text: msg }], details: {} };
+        return textResult(msg);
       }
       const limit = Math.min(params.limit ?? 10, 25);
       try {
         const results = await sessionIndex.search(params.query, limit, signal, params.project);
         if (results.length === 0) {
           const scope = params.project ? ` in project "${params.project}"` : "";
-          return {
-            content: [
-              {
-                type: "text",
-                text: `No relevant sessions found for: "${params.query}"${scope}`
-              }
-            ],
-            details: {}
-          };
+          return textResult(`No relevant sessions found for: "${params.query}"${scope}`);
         }
         const home = process.env.HOME || "";
         const output = results.map((r, i) => {
@@ -1889,10 +1904,11 @@ ${lines.join("\n")}
         const header = `Found ${results.length} sessions for "${params.query}"${scopeNote} (${sessionIndex.size()} sessions indexed):
 
 `;
-        return {
-          content: [{ type: "text", text: header + output }],
-          details: { resultCount: results.length, indexSize: sessionIndex.size(), project: params.project }
-        };
+        return textResult(header + output, {
+          resultCount: results.length,
+          indexSize: sessionIndex.size(),
+          project: params.project
+        });
       } catch (err) {
         throw new Error(`session-search failed: ${err.message}`);
       }
@@ -1927,7 +1943,7 @@ ${lines.join("\n")}
     async execute(_toolCallId, params) {
       if (!sessionIndex || sessionIndex.size() === 0) {
         const msg = !sessionIndex ? "Session index not ready yet." : "Session index is empty.";
-        return { content: [{ type: "text", text: msg }], details: {} };
+        return textResult(msg);
       }
       const limit = Math.min(params.limit ?? 20, 50);
       const sessions = sessionIndex.list({
@@ -1938,10 +1954,7 @@ ${lines.join("\n")}
         limit
       });
       if (sessions.length === 0) {
-        return {
-          content: [{ type: "text", text: "No sessions match the filters." }],
-          details: {}
-        };
+        return textResult("No sessions match the filters.");
       }
       const home = process.env.HOME || "";
       const output = sessions.map((s, i) => {
@@ -1957,10 +1970,7 @@ ${lines.join("\n")}
       const header = `${sessions.length} sessions (${sessionIndex.size()} total indexed):
 
 `;
-      return {
-        content: [{ type: "text", text: header + output }],
-        details: { resultCount: sessions.length }
-      };
+      return textResult(header + output, { resultCount: sessions.length });
     }
   });
   pi.registerTool({
@@ -1995,15 +2005,9 @@ ${lines.join("\n")}
         if (entry) {
           filePath = entry.session.file;
         } else {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Session not found: "${params.session}". Use session_search or session_list to find the session file path.`
-              }
-            ],
-            details: {}
-          };
+          return textResult(
+            `Session not found: "${params.session}". Use session_search or session_list to find the session file path.`
+          );
         }
       }
       if (filePath.startsWith("~")) {
@@ -2018,15 +2022,9 @@ ${lines.join("\n")}
       ];
       const resolvedPath = resolve(filePath);
       if (!allowedRoots.some((root) => resolvedPath.startsWith(root + "/") || resolvedPath === root)) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Access denied: path "${filePath}" is outside the allowed session directories.`
-            }
-          ],
-          details: {}
-        };
+        return textResult(
+          `Access denied: path "${filePath}" is outside the allowed session directories.`
+        );
       }
       const limit = Math.min(params.limit ?? 50, 100);
       const output = readSessionConversation(filePath, {
@@ -2034,10 +2032,7 @@ ${lines.join("\n")}
         limit,
         includeTools: params.include_tools ?? false
       });
-      return {
-        content: [{ type: "text", text: output }],
-        details: { file: filePath }
-      };
+      return textResult(output, { file: filePath });
     }
   });
 }
