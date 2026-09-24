@@ -411,7 +411,15 @@ describe("FtsSessionIndex.search with project filter", () => {
     writeSession(projADir, "alpha-001", "/tmp/project-alpha", "refactor the authentication flow in alpha");
     writeSession(projBDir, "beta-001",  "/tmp/project-beta",  "refactor the authentication flow in beta");
     writeSession(projBDir, "beta-002",  "/tmp/project-beta",  "debug a totally unrelated lambda timeout");
-    const idx = new FtsSessionIndex(indexDir, [join(tmpRoot, "sessions")], []);
+    // Override the default dirs so the test never indexes the developer's
+    // real ~/.pi/agent/sessions (that took ~9s per test on a busy machine).
+    const idx = new FtsSessionIndex(
+      indexDir,
+      [],
+      [],
+      join(tmpRoot, "sessions"),
+      join(tmpRoot, "archive"),
+    );
     await idx.load();
     await idx.sync();
     return idx;
@@ -423,11 +431,8 @@ describe("FtsSessionIndex.search with project filter", () => {
     try {
       const results = await idx.search("authentication", 50);
       const ids = new Set(results.map((r) => r.session.id));
-      // Our two test sessions that match "authentication" must both be present.
-      // (There may be additional real-world sessions indexed from ~/.pi/agent/sessions;
-      // the key property under test is that no project filter ⇒ no project pruning.)
-      assert.ok(ids.has("alpha-001"), "expected alpha-001 in unfiltered results");
-      assert.ok(ids.has("beta-001"),  "expected beta-001 in unfiltered results");
+      // No project filter ⇒ no project pruning: both auth sessions match.
+      assert.deepEqual([...ids].sort(), ["alpha-001", "beta-001"]);
     } finally {
       idx.close();
       rmSync(tmpRoot, { recursive: true, force: true });
