@@ -155,7 +155,7 @@ export default function (pi: ExtensionAPI) {
    * should return instead.
    */
   function usableIndex(): IndexService | string {
-    if (indexState === "failed") return `Session index unavailable: ${withReloadHint(indexError)}`;
+    if (indexState === "failed") return `Session index unavailable: ${indexError}`;
     if (!sessionIndex || indexState === "off" || indexState === "loading") {
       return "Session index warming (loading the saved index). Try again in a moment.";
     }
@@ -281,10 +281,11 @@ export default function (pi: ExtensionAPI) {
     if (!useIndexWorker || !existsSync(indexWorkerFile)) return createIndexService(options);
     return spawnIndexWorker(indexWorkerFile, options, (err) => {
       indexState = "failed";
-      indexError = err.message;
+      // A new worker can recover from a crash; init failures keep their own advice.
+      indexError = withReloadHint(err.message);
       if (syncTimer) clearInterval(syncTimer);
       syncTimer = null;
-      if (!shuttingDown) ctx.ui.notify(`session-search: ${withReloadHint(err.message)}`, "error");
+      if (!shuttingDown) ctx.ui.notify(`session-search: ${indexError}`, "error");
     });
   }
 
