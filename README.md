@@ -122,7 +122,7 @@ session_search(query="CI pipeline configuration", limit=5)
 
 ### Browse sessions
 ```
-session_list(project="Rosie", after="2026-03-01")
+session_list(project="myapp", after="2026-03-01")
 session_list(archived=true, limit=20)
 ```
 
