@@ -80,17 +80,8 @@ export class FtsSessionIndex {
 
     // FTS5 has no unique constraint, and releases before 1.6.0 could index one
     // id twice when two pi processes synced at once. Keep each id's newest row.
-    // The read-only check spares normal opens a write lock.
     if (this.db.prepare("SELECT 1 FROM sessions GROUP BY id HAVING COUNT(*) > 1 LIMIT 1").get()) {
-      this.db.exec(`
-        DELETE FROM sessions WHERE rowid IN (
-          SELECT rowid FROM (
-            SELECT rowid, row_number() OVER (
-              PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
-            ) AS rank FROM sessions
-          ) WHERE rank > 1
-        )
-      `);
+      dropDuplicateRows(this.db);
     }
   }
 
@@ -216,9 +207,9 @@ export class FtsSessionIndex {
       const content = buildContent(session);
       const summary = buildSummary(session);
       const isUpdate = currentIds.has(item.id);
-      // Delete even for ids that looked new: another pi process sharing this
-      // DB may have inserted the id since currentRows was read.
-      replaceDel.run(item.id);
+      // A DELETE by the UNINDEXED id scans the whole table, so only updates
+      // pay it; ids another process inserted meanwhile are deduped below.
+      if (isUpdate) replaceDel.run(item.id);
       insertStmt.run(
         session.id,
         session.file,
@@ -237,6 +228,9 @@ export class FtsSessionIndex {
       done++;
       if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
     }
+    // Another pi process sharing this DB may have inserted some of the ids
+    // added here since currentRows was read. One scan per sync removes them.
+    if (added > 0) dropDuplicateRows(this.db);
     this.db.exec("COMMIT");
 
     return { added, updated, removed, moved };
@@ -314,6 +308,19 @@ export class FtsSessionIndex {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
+
+/** Delete all but each id's newest row (by mtime, then rowid). One table scan. */
+function dropDuplicateRows(db: DatabaseSync): void {
+  db.exec(`
+    DELETE FROM sessions WHERE rowid IN (
+      SELECT rowid FROM (
+        SELECT rowid, row_number() OVER (
+          PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
+        ) AS rank FROM sessions
+      ) WHERE rank > 1
+    )
+  `);
+}
 
 export function buildContent(s: ParsedSession): string {
   const parts: string[] = [];

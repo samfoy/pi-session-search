@@ -669,15 +669,7 @@ var FtsSessionIndex = class {
       );
     `);
     if (this.db.prepare("SELECT 1 FROM sessions GROUP BY id HAVING COUNT(*) > 1 LIMIT 1").get()) {
-      this.db.exec(`
-        DELETE FROM sessions WHERE rowid IN (
-          SELECT rowid FROM (
-            SELECT rowid, row_number() OVER (
-              PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
-            ) AS rank FROM sessions
-          ) WHERE rank > 1
-        )
-      `);
+      dropDuplicateRows(this.db);
     }
   }
   save() {
@@ -777,7 +769,7 @@ var FtsSessionIndex = class {
       const content = buildContent(session);
       const summary = buildSummary(session);
       const isUpdate = currentIds.has(item.id);
-      replaceDel.run(item.id);
+      if (isUpdate) replaceDel.run(item.id);
       insertStmt.run(
         session.id,
         session.file,
@@ -797,6 +789,7 @@ var FtsSessionIndex = class {
       done++;
       if (done % 25 === 0) onProgress?.(`Indexed ${done}/${toIngest.length}...`);
     }
+    if (added > 0) dropDuplicateRows(this.db);
     this.db.exec("COMMIT");
     return { added, updated, removed, moved };
   }
@@ -868,6 +861,17 @@ var FtsSessionIndex = class {
     this.db.close();
   }
 };
+function dropDuplicateRows(db) {
+  db.exec(`
+    DELETE FROM sessions WHERE rowid IN (
+      SELECT rowid FROM (
+        SELECT rowid, row_number() OVER (
+          PARTITION BY id ORDER BY CAST(mtimeMs AS REAL) DESC, rowid DESC
+        ) AS rank FROM sessions
+      ) WHERE rank > 1
+    )
+  `);
+}
 function buildContent(s) {
   const parts = [];
   if (s.name) parts.push(s.name);
