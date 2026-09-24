@@ -158,7 +158,9 @@ export function spawnIndexWorker(
   // stdout/stderr: true keeps worker output (e.g. node:sqlite's
   // ExperimentalWarning on Node 22) from painting over pi's TUI.
   const worker = new Worker(workerFile, { workerData: options, stdout: true, stderr: true });
-  worker.unref();
+  // No worker.unref(): reading stdout/stderr and the "message" listener
+  // re-reference the worker, so it would do nothing. session_shutdown ends
+  // the worker through close().
   worker.stdout.resume();
   let stderrTail = "";
   worker.stderr.on("data", (chunk: Buffer) => {

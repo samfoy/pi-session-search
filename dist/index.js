@@ -1384,7 +1384,6 @@ function createIndexService(options) {
 }
 function spawnIndexWorker(workerFile, options, onCrash) {
   const worker = new Worker(workerFile, { workerData: options, stdout: true, stderr: true });
-  worker.unref();
   worker.stdout.resume();
   let stderrTail = "";
   worker.stderr.on("data", (chunk) => {
