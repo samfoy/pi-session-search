@@ -1741,6 +1741,7 @@ ${lines.join("\n")}
       ctx.ui.notify("session-search: sync auto-disabled (child process detected)", "info");
     }
     const primerDone = startIndex(currentConfig, ctx, syncAction, initialAction);
+    if (currentConfig?.primer?.enabled === false) return;
     await Promise.race([
       primerDone,
       new Promise((r) => setTimeout(r, PRIMER_WAIT_MS).unref())
@@ -1788,9 +1789,7 @@ ${lines.join("\n")}
       await index.load();
       if (shuttingDown) return;
       indexState = "warming";
-      if (config?.primer?.enabled === false) {
-        ctx.ui.notify("session-search: primer disabled via config", "info");
-      } else {
+      if (config?.primer?.enabled !== false) {
         await injectPrimer(index, ctx);
       }
       if (shuttingDown) return;

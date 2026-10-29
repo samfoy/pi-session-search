@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.1
+
+### Fixed
+
+- With `primer.enabled = false`, `session_start` no longer waits for the index worker to load the
+  saved index (about 190 ms per pi start here, in every pi process). The wait only exists so the
+  primer can precede the first prompt, so it is skipped when there is no primer to send.
+- The "primer disabled via config" notice is no longer shown at every start.
+
 ## 1.6.0
 
 The first npm release since 1.4.3. It also ships everything listed under 1.5.0, which reached GitHub but never npm.

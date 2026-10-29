@@ -256,8 +256,10 @@ export default function (pi: ExtensionAPI) {
     // FTS5 works out of the box with no config; embeddings are optional.
     // The index loads on a worker thread, so waiting here for the primer (so
     // it precedes the first prompt, e.g. with `pi -p`) never blocks pi's
-    // event loop; the cap bounds how long startup waits on it.
+    // event loop; the cap bounds how long startup waits on it. With the primer
+    // disabled there is nothing to wait for, so session_start returns at once.
     const primerDone = startIndex(currentConfig, ctx, syncAction, initialAction);
+    if (currentConfig?.primer?.enabled === false) return;
     await Promise.race([
       primerDone,
       new Promise<void>((r) => setTimeout(r, PRIMER_WAIT_MS).unref()),
@@ -331,9 +333,7 @@ export default function (pi: ExtensionAPI) {
       // last user message (which caused it to override user questions in
       // pi-session-search 1.4.0).
       // Skip when explicitly disabled via config (`primer.enabled = false`).
-      if (config?.primer?.enabled === false) {
-        ctx.ui.notify("session-search: primer disabled via config", "info");
-      } else {
+      if (config?.primer?.enabled !== false) {
         await injectPrimer(index, ctx);
       }
       if (shuttingDown) return;
