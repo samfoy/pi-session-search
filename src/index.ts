@@ -405,6 +405,10 @@ export default function (pi: ExtensionAPI) {
                 `Sessions: ${changes} (${await index.size()} total)`,
               );
               scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5000);
+            } else {
+              // No changes: clear the last onProgress message ("Indexed n/n...")
+              // so it does not linger in the footer's extension-status line.
+              ctx.ui.setStatus("session-search", "");
             }
           }
         } catch (err: any) {
