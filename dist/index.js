@@ -1846,6 +1846,8 @@ ${lines.join("\n")}
                 `Sessions: ${changes} (${await index.size()} total)`
               );
               scheduleTimer(() => ctx.ui.setStatus("session-search", ""), 5e3);
+            } else {
+              ctx.ui.setStatus("session-search", "");
             }
           }
         } catch (err) {

@@ -12,6 +12,10 @@ export interface FakeHost {
   indexDir: string;
   sent: { message: any; options: any }[];
   notes: string[];
+  /** Every ctx.ui.setStatus(key, text) call, in order. */
+  statuses: { key: string; text: string }[];
+  /** Latest status text per key ("" = cleared). */
+  status(key: string): string;
   start(): Promise<void>;
   shutdown(): Promise<void>;
   tool(name: string, params: Record<string, unknown>): Promise<string>;
@@ -63,6 +67,8 @@ export function createFakeHost(
   const tools = new Map<string, any>();
   const sent: { message: any; options: any }[] = [];
   const notes: string[] = [];
+  const statuses: { key: string; text: string }[] = [];
+  const statusMap = new Map<string, string>();
   extension({
     on: (event: string, fn: any) => handlers.set(event, fn),
     registerTool: (t: any) => tools.set(t.name, t),
@@ -72,7 +78,13 @@ export function createFakeHost(
   const ctx = {
     cwd: root,
     hasUI: true,
-    ui: { notify: (m: string) => notes.push(m), setStatus: () => {} },
+    ui: {
+      notify: (m: string) => notes.push(m),
+      setStatus: (key: string, text: string) => {
+        statuses.push({ key, text: text ?? "" });
+        statusMap.set(key, text ?? "");
+      },
+    },
     sessionManager: { getEntries: () => [] },
   };
 
@@ -82,6 +94,8 @@ export function createFakeHost(
     indexDir: join(base, "index"),
     sent,
     notes,
+    statuses,
+    status: (key: string) => statusMap.get(key) ?? "",
     start: async () => handlers.get("session_start")!({ type: "session_start", reason: "startup" }, ctx),
     shutdown: async () => handlers.get("session_shutdown")!({ type: "session_shutdown" }, ctx),
     tool: async (name, params) => (await tools.get(name).execute("call", params)).content[0].text,
